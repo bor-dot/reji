@@ -269,17 +269,19 @@ export const deepenPack = createServerFn({ method: "POST" })
 
     const lang = brief.language === "en" ? "English" : "Turkish";
     const system = [
-      "You are a YouTube showrunner writing a production pack.",
+      "You are a senior YouTube writer and showrunner. The pack must be shootable tomorrow.",
       `Write every audience-facing string in ${lang}.`,
       "Return one JSON object and nothing else. A json code fence is allowed if the tool requires it.",
+      "Spoken lines sound like a film, not a blog. No greetings, no 'bu videoda', no filler, no fake cliffhanger.",
+      "Open on a concrete image or a checkable fact. Every beat changes what the viewer sees.",
       "The video must be able to pay every claim. No fake curiosity, no fear in children's films, no sarcasm aimed at a child.",
       "For belgesel: claim and evidence live in different sentences. Do not invent sources beyond the ones given.",
       "For cocuk: 3–6 age, warm, a repeatable line, no monster, no death.",
       "For shorts: spoken draft fits about 45 seconds, one claim, a loop back to the first frame.",
-      "Voice lines are speakable. Directing notes go in visual, cut, face, layout — not in voice.",
+      "Voice is narration only. Directing notes go in visual, screen, cut, face, layout — never in voice.",
       "Thumbnail words: at most 5, and they must not repeat the video title.",
       `Spoken voice across the beats of this first section should be about ${Math.min(700, Math.max(120, Math.round((brief.minutes <= 5 ? 650 : brief.minutes <= 10 ? 1300 : brief.minutes <= 20 ? 2600 : 3900) / 3)))} words. Stop at a clean beat if the full runtime is longer.`,
-      "Chapters start at 0:00 and match beat times.",
+      "Chapters start at 0:00 and match beat times. Description is written for a person, not a keyword list.",
       "shot.n is a short string. shot.must is a boolean. Put constraints in do, not in must.",
       "Schema keys: titles[{text,angle,why}], hooks[{window,line,visual,cut}], beats[{time,title,voice,screen,visual}], shots[{n,kind,frame,do,sec,must}], thumb{words,face,layout,contrast,ban}, seo{description,chapters[{time,title}],tags,pinned,end}.",
       "shot.kind is exactly one of: A-roll, B-roll, Grafik, Ses.",
@@ -549,14 +551,15 @@ export const writeNarration = createServerFn({ method: "POST" })
     const writer = writerOf(row?.writer);
     const textModel = typeof row?.textModel === "string" ? row.textModel : "grok-4.5";
     const system = [
-      "You write only the spoken narration of a YouTube video.",
+      "You are a professional voice-over writer for YouTube.",
       `Write in ${language}.`,
       `This pass is about ${ask} spoken words.`,
-      "No titles, no timecodes, no shot lists, no screen directions, no markdown headings.",
+      "Write the film, not an outline. Short sentences. One idea each. Concrete nouns. Room to breathe.",
+      "No greetings, no 'bu videoda', no titles, no timecodes, no shot lists, no markdown.",
       "Do not write [GÖRSEL], [EKRAN] or [ANİMASYON].",
       "Separate paragraphs with a blank line. The listener hears every word.",
       "Do not invent sources or claim a fact you were not given.",
-      previous ? "Continue after the text already written. Do not repeat it." : "Start with the opening line.",
+      previous ? "Continue after the text already written. Do not repeat it." : "Start with the opening image, said out loud.",
       'Return one JSON object: {"text":"the narration"}',
     ].join(" ");
     const user = [

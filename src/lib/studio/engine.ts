@@ -606,8 +606,16 @@ export function scenesFor(b: Brief, channel: Channel, beats: Beat[], previous?: 
       channel.kind === "belgesel" ? index > 0 && index < beats.length - 1 : channel.kind === "mitoloji";
     const label = reconstruction ? " Yapay zekâ simülasyonu, arşiv görüntüsü değil." : "";
     const visual = beat.visual.replace(/\.+$/, "");
-    const imagePrompt = `${channel.visualStyle}. Sahne: ${beat.title}. ${visual}. Tek ana öğe, üst yarıda, karede yazı yok.${label}`;
-    const videoPrompt = `${imagePrompt} Tek plan, 6 saniye, yavaş ve okunur hareket, kesme yok.`;
+    const imagePrompt = [
+      channel.visualStyle,
+      "16:9, sinematik ışık, tek ana öğe, kadrajın üst yarısı, karede yazı yok, logo yok.",
+      `Sahne: ${beat.title}.`,
+      `${visual}.`,
+      label.trim(),
+    ]
+      .filter(Boolean)
+      .join(" ");
+    const videoPrompt = `${imagePrompt} Tek plan, 6 saniye, kamera sabit ya da çok hafif, yavaş hareket, kesme yok.`;
     const prev = previous?.find((scene) => scene.title === beat.title);
     return {
       id: prev?.id ?? `sahne-${index + 1}`,

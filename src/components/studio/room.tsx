@@ -29,6 +29,80 @@ const STAGES = [
 
 type StageId = (typeof STAGES)[number][0];
 
+function mediaNote(error: string) {
+  if (/kota|429|quota|credit|billing/i.test(error)) {
+    return "Grok kotası doldu. Yedek API’ye geç ya da dosyayı bırak.";
+  }
+  return error;
+}
+
+function GrokRail({
+  project,
+  busy,
+  onWrite,
+  onOpen,
+}: {
+  project: Project;
+  busy: boolean;
+  onWrite: () => void;
+  onOpen: (stage: StageId) => void;
+}) {
+  const scenes = project.pack.scenes ?? [];
+  const words = countWords(narrationText(project.pack.beats));
+  const target = targetWords(project.brief.minutes);
+  const written = project.pack.source === "grok";
+  const narration = words >= Math.round(target * 0.7);
+  const images = scenes.filter((scene) => scene.imageUrl).length;
+  const videos = scenes.filter((scene) => scene.videoUrl).length;
+  const voices = scenes.filter((scene) => scene.audioDuration).length;
+  const cover = Boolean(project.pack.thumb.imageUrl);
+  const steps: { label: string; ok: boolean }[] = [
+    { label: "Yazı", ok: written },
+    { label: "Metin", ok: narration },
+    { label: "Kapak", ok: cover },
+    { label: `Görsel ${images}/${scenes.length}`, ok: scenes.length > 0 && images === scenes.length },
+    { label: `Video ${videos}/${scenes.length}`, ok: videos > 0 },
+    { label: `Ses ${voices}/${scenes.length}`, ok: scenes.length > 0 && voices === scenes.length },
+    { label: "Çıktı", ok: written && narration && cover && images === scenes.length && voices === scenes.length },
+  ];
+  const next = !written
+    ? { label: "Grok ile yaz", run: onWrite }
+    : !narration
+      ? { label: "Metni Grok yazsın", run: () => onOpen("metin") }
+      : !cover
+        ? { label: "Kapağı Imagine çizsin", run: () => onOpen("kapak") }
+        : images < scenes.length
+          ? { label: "Sıradaki sahneyi Imagine çizsin", run: () => onOpen("gorsel") }
+          : voices < scenes.length
+            ? { label: "Sesi Grok okusun", run: () => onOpen("ses") }
+            : videos < scenes.length
+              ? { label: "Videoyu Imagine çeksin", run: () => onOpen("gorsel") }
+              : { label: "Çıktıyı al", run: () => onOpen("yayin") };
+
+  return (
+    <div className="flex flex-col gap-3 rounded-2xl bg-elevated p-4 ring-1 ring-line">
+      <div className="flex items-baseline justify-between gap-3">
+        <h2 className="text-lg">Grok süreci</h2>
+        <p className="text-sm text-faint">Önce Grok. Kota bitince yedek.</p>
+      </div>
+      <div className="flex gap-2 overflow-x-auto pb-1">
+        {steps.map((step) => (
+          <span
+            key={step.label}
+            className={`nums shrink-0 rounded-full px-3 py-2 text-sm ${step.ok ? "bg-paper text-ink" : "text-muted ring-1 ring-line"}`}
+          >
+            {step.ok ? "Tamam · " : ""}
+            {step.label}
+          </span>
+        ))}
+      </div>
+      <Button onClick={next.run} disabled={busy}>
+        {busy ? "Yazıyor…" : next.label}
+      </Button>
+    </div>
+  );
+}
+
 function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
   return new Promise((resolve, reject) => {
     const timer = window.setTimeout(() => reject(new Error(message)), ms);
@@ -239,7 +313,7 @@ export function Room({ project }: { project: Project }) {
           <p className="text-sm text-fg">Kaynak boş. Belgeselde metin, kaynak yazılmadan kurulmaz.</p>
         ) : null}
         {error ? <p className="text-sm text-fg">{error}</p> : null}
-        <p className="text-sm text-faint">Grok tek istek atar. Aynı brief’i tekrar yazdırmak kotayı yer.</p>
+        <GrokRail project={project} busy={busy} onWrite={() => void onGrok()} onOpen={setStage} />
       </header>
 
       <StageDock stage={stage} onPick={setStage} />
@@ -290,7 +364,11 @@ export function Room({ project }: { project: Project }) {
             <ShotsStage pack={project.pack} onPatch={(patch) => patchPack(project.id, patch)} />
           ) : null}
           {stage === "kapak" && channel ? (
-            <ThumbStage channel={channel} pack={project.pack} onPatch={(patch) => patchPack(project.id, patch)} />
+            <ThumbStage
+              channel={channel}
+              pack={project.pack}
+              onPatch={(patch) => patchPack(project.id, patch)}
+            />
           ) : null}
           {stage === "gorsel" && channel ? (
             <VisualStage project={project} channel={channel} />
@@ -792,19 +870,72 @@ function ThumbStage({
   channel: Channel;
   onPatch: (patch: Partial<Pack>) => void;
 }) {
+  const { models, keyFor } = useStudio();
+  const imagine = useServerFn(imagineScene);
+  const [busy, setBusy] = useState(false);
   const thumb = pack.thumb;
   const paint = channel.cover;
+  const prompt = [
+    channel.visualStyle,
+    "YouTube kapak, 16:9, tek ana öğe, karede yazı yok, logo yok.",
+    thumb.face,
+    thumb.layout,
+    thumb.contrast,
+    `Yasak: ${thumb.ban}`,
+  ].join(" ");
+
+  async function draw() {
+    setBusy(true);
+    try {
+      const blob = keyFor("xai");
+      const res = await imagine({
+        data: {
+          prompt,
+          model: models.image,
+          route: "xai",
+          sealed: blob ? { iv: blob.iv, ciphertext: blob.ciphertext } : undefined,
+        },
+      });
+      if (!res.ok) notify(mediaNote(res.error));
+      else {
+        onPatch({ thumb: { ...thumb, imageUrl: res.url } });
+        notify("Kapak Imagine’dan geldi.");
+      }
+    } catch {
+      notify("Kapak üretilemedi.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function takeFile(file: File | undefined) {
+    if (!file || !file.type.startsWith("image")) return;
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    let binary = "";
+    for (let index = 0; index < bytes.length; index += 0x8000) {
+      binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
+    }
+    onPatch({ thumb: { ...thumb, imageUrl: `data:${file.type};base64,${btoa(binary)}` } });
+    notify("Kapak dosyadan alındı.");
+  }
+
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <h2 className="text-2xl">Kapak</h2>
-        <CopyButton
-          text={`${thumb.words}\n${thumb.face}\n${thumb.layout}\n${thumb.contrast}\nYasak: ${thumb.ban}`}
-        />
+        <div className="flex flex-wrap gap-2">
+          <Button onClick={() => void draw()} disabled={busy}>
+            {busy ? "Imagine çiziyor…" : "Grok Imagine çizsin"}
+          </Button>
+          <CopyButton
+            text={`${thumb.words}\n${thumb.face}\n${thumb.layout}\n${thumb.contrast}\nYasak: ${thumb.ban}`}
+          />
+        </div>
       </div>
-      <div className="aspect-video overflow-hidden rounded-xl" style={{ background: paint.bg }}>
-        <div className="grid h-full grid-cols-2">
-          <div className="flex items-start p-3 sm:p-5" style={{ background: paint.panel }}>
+      <div className="relative aspect-video overflow-hidden rounded-xl" style={{ background: paint.bg }}>
+        {thumb.imageUrl ? <img src={thumb.imageUrl} alt="" className="absolute inset-0 h-full w-full object-cover" /> : null}
+        <div className="relative grid h-full grid-cols-2">
+          <div className="flex items-start p-3 sm:p-5" style={{ background: thumb.imageUrl ? "transparent" : paint.panel }}>
             <p
               className="font-display text-2xl font-semibold leading-none sm:text-4xl"
               style={{
@@ -816,19 +947,28 @@ function ThumbStage({
               {thumb.words}
             </p>
           </div>
-          <div className="flex items-start justify-center p-4" style={{ background: paint.scene }}>
-            <div
-              className="mt-1 h-14 w-14 rounded-full sm:h-24 sm:w-24"
-              style={{ background: paint.bg }}
-              aria-hidden
-            />
-          </div>
+          {thumb.imageUrl ? null : (
+            <div className="flex items-start justify-center p-4" style={{ background: paint.scene }}>
+              <div className="mt-1 h-14 w-14 rounded-full sm:h-24 sm:w-24" style={{ background: paint.bg }} aria-hidden />
+            </div>
+          )}
         </div>
       </div>
       <p className="text-sm text-faint">
-        Kadraj kılavuzu, fotoğraf değil. Yazı üst yarıda, kalın ve konturlu, en fazla beş kelime. Tek karakter.
-        Başlık tekrarlanmaz.
+        Imagine fotoğrafı çizer, yazı üstte kalır. Kota bitince kendi kapağını bırak.
       </p>
+      <label className="flex min-h-11 cursor-pointer items-center rounded-lg px-3 text-sm text-muted ring-1 ring-dashed ring-line">
+        Kapak dosyası bırak
+        <input
+          type="file"
+          accept="image/*"
+          className="sr-only"
+          onChange={(event) => {
+            void takeFile(event.target.files?.[0]);
+            event.target.value = "";
+          }}
+        />
+      </label>
       <label className="flex flex-col gap-2 text-sm text-muted">
         Kapak yazısı
         <input
@@ -887,7 +1027,7 @@ function VisualStage({ project, channel }: { project: Project; channel: Channel 
         data: { prompt: scene.imagePrompt, model: models.image, route, sealed: sealed(route) },
       });
       if (!alive.current) return;
-      if (!res.ok) notify(res.error);
+      if (!res.ok) notify(mediaNote(res.error));
       else {
         writeScene(scene.id, { imageUrl: res.url });
         notify("Görsel geldi.");
@@ -915,7 +1055,7 @@ function VisualStage({ project, channel }: { project: Project; channel: Channel 
       });
       if (!alive.current) return;
       if (!started.ok) {
-        notify(started.error);
+        notify(mediaNote(started.error));
         return;
       }
       const deadline = Date.now() + (route === "gemini" ? 240_000 : 120_000);
@@ -925,7 +1065,7 @@ function VisualStage({ project, channel }: { project: Project; channel: Channel 
         const status = await poll({ data: { requestId: started.requestId, route, sealed: sealed(route) } });
         if (!alive.current) return;
         if (!status.ok) {
-          notify(status.error);
+          notify(mediaNote(status.error));
           return;
         }
         if (status.status === "done" && status.url) {
@@ -975,9 +1115,20 @@ function VisualStage({ project, channel }: { project: Project; channel: Channel 
       <div>
         <h2 className="text-2xl">Görsel</h2>
         <p className="mt-1 text-sm text-muted">
-          {channel.name} stili. xAI video 6 sn. Veo 8 sn, boy Ayarlar’dan. Elle yol dosyayı sahneye bırakır.
+          Önce Grok Imagine, {channel.name} stili. Kota bitince Yedek API ya da kendi dosyan. Video 6 sn, Veo 8 sn.
         </p>
       </div>
+      {scenes.some((scene) => !scene.imageUrl) ? (
+        <Button
+          disabled={Boolean(busy)}
+          onClick={() => {
+            const next = scenes.find((scene) => !scene.imageUrl);
+            if (next) void onImage({ ...next, route: "xai" });
+          }}
+        >
+          {busy.endsWith("-img") ? "Imagine çiziyor…" : "Sıradaki sahneyi Imagine çizsin"}
+        </Button>
+      ) : null}
       {scenes.length === 0 ? (
         <p className="text-sm text-muted">Sahne yok. Kalıbı kurunca promptlar gelir.</p>
       ) : null}
@@ -1008,9 +1159,9 @@ function VisualStage({ project, channel }: { project: Project; channel: Channel 
           <div className="flex flex-wrap gap-2">
             {(
               [
-                ["xai", "xAI"],
-                ["gemini", "Gemini"],
-                ["elle", "Elle"],
+                ["xai", "Grok Imagine"],
+                ["gemini", "Yedek API"],
+                ["elle", "Dosya"],
               ] as const
             ).map(([id, label]) => (
               <Chip key={id} active={routeOf(scene) === id} onClick={() => writeScene(scene.id, { route: id })}>
@@ -1022,10 +1173,14 @@ function VisualStage({ project, channel }: { project: Project; channel: Channel 
             {routeOf(scene) === "elle" ? null : (
               <>
                 <Button disabled={Boolean(busy)} onClick={() => void onImage(scene)}>
-                  {busy === `${scene.id}-img` ? "Üretiliyor" : "Görsel üret"}
+                  {busy === `${scene.id}-img` ? "Üretiliyor" : routeOf(scene) === "gemini" ? "Yedek görsel" : "Imagine çiz"}
                 </Button>
                 <Button variant="line" disabled={Boolean(busy)} onClick={() => void onVideo(scene)}>
-                  {busy === `${scene.id}-vid` ? "Video işleniyor" : routeOf(scene) === "gemini" ? "Veo üret" : "Video üret"}
+                  {busy === `${scene.id}-vid`
+                    ? "Video işleniyor"
+                    : routeOf(scene) === "gemini"
+                      ? "Veo üret"
+                      : "Imagine video"}
                 </Button>
               </>
             )}

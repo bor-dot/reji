@@ -145,8 +145,8 @@ export function Settings() {
         <p className="text-sm text-faint">Bağlantı</p>
         <h1 className="mt-1 text-4xl">Ayarlar</h1>
         <p className="mt-3 text-muted">
-          Grok bağlantısı durur. Gemini, OpenAI ve Anthropic için giriş, Sesle’deki gibi sağlayıcının kendi
-          sayfasında olur. Şifre buraya yazılmaz; yalnızca yapıştırdığın anahtarın son dört hanesi kalır.
+          Önce Grok. Metin, Imagine görsel, video ve ses onunla biter. Kota dolunca Gemini, OpenAI, Anthropic
+          ya da kendi dosyan devreye girer. Şifre yazılmaz; yalnızca yapıştırdığın anahtarın son dört hanesi kalır.
         </p>
       </header>
 
@@ -192,9 +192,8 @@ export function Settings() {
           }}
         />
         <p className="text-sm text-faint">
-          Sahne, xAI, Gemini ya da elle kopyayı kendi seçer. Metin kaynağı API ise anahtar kullanılır. CLI (otomatik)
-          bağlı olanı seçer. Belirli bir CLI seçiliyse o öne alınır, değilse sıra Codex, Grok, Claude, Gemini. Anahtar
-          yoksa da CLI'ya düşer.
+          Varsayılan yol Grok: metin API, görsel Imagine, video Imagine, ses Grok. Kota dolunca yedek API ya da
+          sahneye bırakılan dosya. CLI seçilirse metin oradan yazılır, görsel yine Imagine’da kalır.
         </p>
       </section>
 

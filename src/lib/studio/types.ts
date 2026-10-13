@@ -46,6 +46,7 @@ export type Thumb = {
   layout: string;
   contrast: string;
   ban: string;
+  imageUrl?: string;
 };
 
 export type Chapter = { time: string; title: string };

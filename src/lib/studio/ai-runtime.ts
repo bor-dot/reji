@@ -76,6 +76,9 @@ export function describeGrok() {
 
 function clipError(status: number, body: string) {
   const clean = body.replace(/sk-[a-zA-Z0-9_-]{8,}/g, "…").replace(/xai-[a-zA-Z0-9_-]{8,}/g, "…").slice(0, 180);
+  if (status === 429 || /quota|credit|billing|insufficient|rate limit|resource_exhausted/i.test(clean)) {
+    return "Kota doldu.";
+  }
   return `Yanıt ${status}. ${clean}`;
 }
 

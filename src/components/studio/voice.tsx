@@ -262,15 +262,15 @@ export function VoiceStage({ project, channel }: { project: Project; channel: Ch
       <div>
         <h2 className="text-2xl">Ses</h2>
         <p className="mt-1 text-sm text-muted">
-          Grok sesi durur. Sesle ayrı bir giriştir; şifre saklanmaz. {channel.name} için önerilen ses {suggested.name}.
+          Önce Grok okur. Kota bitince Sesle. {channel.name} için önerilen ses {suggested.name}.
         </p>
       </div>
       <div className="flex gap-2">
-        <Chip active={mode === "sesle"} onClick={() => setMode("sesle")}>
-          Sesle
-        </Chip>
         <Chip active={mode === "xai"} onClick={() => setMode("xai")}>
-          xAI Ses
+          Grok ses
+        </Chip>
+        <Chip active={mode === "sesle"} onClick={() => setMode("sesle")}>
+          Yedek · Sesle
         </Chip>
       </div>
       {mode === "sesle" ? <SeslePanel project={project} channel={channel} /> : null}
@@ -278,7 +278,7 @@ export function VoiceStage({ project, channel }: { project: Project; channel: Ch
 
       <div className="flex flex-wrap gap-2">
         <Button variant="line" onClick={() => setText(scriptOf(project))}>
-          Senaryodan al
+          Metinden al
         </Button>
         <Button variant="line" onClick={() => setVoiceId(suggested.id)}>
           {suggested.name}
