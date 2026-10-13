@@ -18,15 +18,40 @@ const STEPS: Record<StepName, string> = {
   senaryo: `Başlık {baslik}, kanca {kanca}, kaynaklar {kaynaklar}, süre {dakika} dk (~140 kelime/dk). Giriş, {bolum_sayisi} bölüm, kapanış ve abone çağrısı. Sadece kaynaklardaki bilgileri kullan; emin olmadığın iddiayı yazma. Her 60–90 sn'de yeni bir merak sorusu aç. {"bolumler":[{"baslik":"","metin":""}]}`,
   metin: `Senaryodan yalnızca anlatıcının yüksek sesle okuyacağı cümleleri çıkar. Parantez, köşeli parantez, sahne tarifi, ton/duraklama notu, başlık, zaman kodu yazma. Doğal konuşma dili, uzun cümleleri böl, sayıları okunacak biçimde yaz. En fazla 1.800 karakterlik parçalar, cümle ortasından bölme. Senaryo:\n{senaryo}\n{"parcalar":[]}`,
   sahneler: `Parçalar {parcalar}. Her 6–8 sn'lik anlatım için bir sahne; her sahne söylenen cümleye hizmet etsin. {"sahneler":[{"no":1,"anlatim":"","sure_sn":6,"tur":"video","ai_simulasyon":false}]}`,
-  gorsel: `Sahne {anlatim}. {stil} stilinde, {oran}, tek ana konu, sade arka plan, yazısız görsel promptu; İngilizce, en fazla 60 kelime, ışık/açı/renk belirt. {"prompt":""}`,
-  video: `Sahne {anlatim}, görsel {gorsel_prompt}. 6 sn video promptu; İngilizce, en fazla 50 kelime, tek kamera hareketi (yavaş yaklaşma/pan/orbit), konu hareketi, ışık; kesme ve yazı yok. {"prompt":""}`,
+  gorsel: `Video konusu: {konu}. Kanal: {kanal}, stil: {stil}.
+Bu sahnede anlatıcının söylediği cümle: {anlatim}.
+Önceki sahneler: {onceki}
+Görevin: bu cümlenin anlattığı şeyi, videonun konusu bağlamında, tek bir net görüntüye çevirmek.
+Kurallar:
+- Cümledeki somut nesneyi, olayı veya kavramı çiz. Soyutsa onu en iyi anlatan somut bir benzetme veya bilimsel görselleştirme seç.
+- Bölüm adlarını (Kanca, Giriş, Bölüm, Kapanış, Abone) ve kelimelerin mecaz olmayan ilk anlamını çizme; sahnenin anlamını çiz.
+- Tek ana konu, sade arka plan, görselde yazı/logo/altyazı yok.
+- Kanal stiline uy: renk tonu, ışık, kamera açısı. Oran {oran}.
+- Önceki sahnelerle görsel süreklilik olsun (aynı karakter, mekân, renk paleti).
+- İngilizce yaz; görsel en fazla 60 kelime.
+- Bu adım bir görsel promptudur.
+JSON: {"konu_ozeti":"bu sahnede ne gösteriliyor (Türkçe, 1 cümle)","prompt":"..."}`,
+  video: `Video konusu: {konu}. Kanal: {kanal}, stil: {stil}.
+Bu sahnede anlatıcının söylediği cümle: {anlatim}.
+Görsel: {gorsel_prompt}
+Önceki sahneler: {onceki}
+Görevin: bu cümlenin anlattığı şeyi, videonun konusu bağlamında, tek bir net görüntüye çevirmek.
+Kurallar:
+- Cümledeki somut nesneyi, olayı veya kavramı çiz. Soyutsa onu en iyi anlatan somut bir benzetme veya bilimsel görselleştirme seç.
+- Bölüm adlarını (Kanca, Giriş, Bölüm, Kapanış, Abone) ve kelimelerin mecaz olmayan ilk anlamını çizme; sahnenin anlamını çiz.
+- Tek ana konu, sade arka plan, görselde yazı/logo/altyazı yok.
+- Kanal stiline uy: renk tonu, ışık, kamera açısı.
+- Önceki sahnelerle görsel süreklilik olsun (aynı karakter, mekân, renk paleti).
+- İngilizce yaz; video en fazla 50 kelime. Videoda tek kamera hareketi, kesme yok.
+- Bu adım 6 saniyelik bir video promptudur.
+JSON: {"konu_ozeti":"bu sahnede ne gösteriliyor (Türkçe, 1 cümle)","prompt":"..."}`,
   kapak: `Başlık {baslik}. Kapak yazısı en fazla 5 kelime, başlığı tekrar etmesin, tek başına merak uyandırsın; tek ana karakter/nesne; stil {kapak_stili}. Yazı alanı boş görsel promptu (İngilizce). {"kapak_yazisi":"","gorsel_prompt":"","alternatifler":[]}`,
   kontrol: `Başlık en fazla 60 karakter mi, kapak yazısı en fazla 5 kelime ve başlığı tekrar etmiyor mu, kanca ilk 15 sn'de sözü veriyor mu, süre hedefe uyuyor mu, iddiaların kaynağı var mı, sahneler anlatıma uyuyor mu? 0–100 puan, en önemli 3 düzeltme. Başlık: {baslik}. Kanca: {kanca}. Süre: {dakika} dk. Kaynaklar: {kaynaklar}. Parçalar: {parcalar}. {"puan":0,"sorunlar":[],"duzeltmeler":[]}`,
 };
 
 export function fillPrompt(template: string, vars: Record<string, string>) {
   return template.replace(
-    /\{(kanal|konu_türü|kitle|ton|stil|konu|vaat|baslik|kanca|kaynaklar|dakika|bolum_sayisi|senaryo|parcalar|anlatim|gorsel_prompt|ses|hız|kapak_stili|oran)\}/g,
+    /\{(kanal|konu_türü|kitle|ton|stil|konu|vaat|baslik|kanca|kaynaklar|dakika|bolum_sayisi|senaryo|parcalar|anlatim|gorsel_prompt|ses|hız|kapak_stili|oran|onceki)\}/g,
     (token, key: string) => (token ? (vars[key] ?? "") : ""),
   );
 }
@@ -75,6 +100,46 @@ function repairJson(slice: string) {
   return body;
 }
 
+const BANNED_PROMPT = /\b(hook|kanca|fishing|intro|outro|chapter|subscribe)\b/i;
+const STRUCTURE = new Set(["kanca", "giris", "giriş", "bolum", "bölüm", "kapanis", "kapanış", "abone", "hook", "intro", "outro", "chapter", "subscribe", "fishing"]);
+const STOP = new Set(["için", "olan", "olarak", "gibi", "daha", "çok", "bir", "bu", "şu", "ile", "veya", "ama", "hem", "the", "and", "with", "from", "that", "this", "into", "over", "single", "scene", "video", "görsel", "gorsel"]);
+
+function wordsOf(text: string) {
+  return text
+    .toLocaleLowerCase("tr")
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .split(/\s+/)
+    .filter((word) => word.length >= 4 && !STOP.has(word));
+}
+
+function shares(left: string[], right: string[]) {
+  return left.some((word) => right.some((item) => item.includes(word) || word.includes(item)));
+}
+
+export function mediaPromptProblem(
+  kind: "gorsel" | "video",
+  raw: Record<string, unknown>,
+  ctx: { konu?: string; anlatim?: string } = {},
+) {
+  const prompt = clip(raw.prompt, 700);
+  const ozet = clip(raw.konu_ozeti, 220);
+  if (ozet.length < 8) return "konu_ozeti yok. Türkçe bir cümleyle sahnede ne gösterileceğini yaz.";
+  if (prompt.split(/\s+/).filter(Boolean).length < 4) return "prompt çok kısa.";
+  const limit = kind === "video" ? 50 : 60;
+  if (prompt.split(/\s+/).filter(Boolean).length > limit) return `prompt ${limit} kelimeyi aşıyor. Kısalt.`;
+  if (BANNED_PROMPT.test(prompt) || BANNED_PROMPT.test(ozet)) {
+    return "prompt veya özet hook, kanca, fishing, intro, outro, chapter, subscribe içeriyor. Sahnenin anlamını çiz, bölüm adını değil.";
+  }
+  const summary = wordsOf(ozet).filter((word) => !STRUCTURE.has(word));
+  const topic = wordsOf(ctx.konu ?? "");
+  const line = wordsOf(ctx.anlatim ?? "");
+  if (summary.length === 0) return "konu_ozeti yalnızca bölüm adı. Sahnenin anlamını yaz.";
+  if ((topic.length || line.length) && !shares(summary, topic) && !shares(summary, line)) {
+    return "konu_ozeti videonun konusuyla ve söylenen cümleyle ilgisiz. Cümlenin anlattığı şeyi yaz.";
+  }
+  return null;
+}
+
 function clip(value: unknown, max: number) {
   return String(value ?? "").replace(/\s+/g, " ").trim().slice(0, max);
 }
@@ -96,6 +161,7 @@ export type StepResult = {
   parcalar?: string[];
   sahneler?: { no: number; anlatim: string; sure_sn: number; tur: "video" | "gorsel"; ai_simulasyon: boolean }[];
   prompt?: string;
+  konu_ozeti?: string;
   kapak_yazisi?: string;
   gorsel_prompt?: string;
   alternatifler?: string[];
@@ -104,7 +170,11 @@ export type StepResult = {
   duzeltmeler?: string[];
 };
 
-export function acceptStep(step: StepName, raw: Record<string, unknown>): StepResult | null {
+export function acceptStep(
+  step: StepName,
+  raw: Record<string, unknown>,
+  ctx: { konu?: string; anlatim?: string } = {},
+): StepResult | null {
   if (step === "baslik") {
     const basliklar = strings(raw.basliklar, 60, 5);
     if (basliklar.length < 3) return null;
@@ -176,9 +246,9 @@ export function acceptStep(step: StepName, raw: Record<string, unknown>): StepRe
     return { sahneler };
   }
   if (step === "gorsel" || step === "video") {
+    if (mediaPromptProblem(step, raw, ctx)) return null;
     const prompt = clip(raw.prompt, 700);
-    if (prompt.split(/\s+/).length < 4) return null;
-    return { prompt };
+    return { prompt, konu_ozeti: clip(raw.konu_ozeti, 220) };
   }
   if (step === "kapak") {
     const words = clip(raw.kapak_yazisi, 80).split(/\s+/).filter(Boolean).slice(0, 5);

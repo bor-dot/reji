@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServerFn } from "@tanstack/react-start";
 import { openExportFolder, writeShootFiles, type ShootFile } from "./karevo-write";
-import { acceptStep, promptFor, readModelJson, sectionCount, type StepName } from "./prompts";
+import { acceptStep, mediaPromptProblem, promptFor, readModelJson, sectionCount, type StepName } from "./prompts";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -200,6 +200,7 @@ export const produceStep = createServerFn({ method: "POST" })
       senaryo: typeof row?.senaryo === "string" ? row.senaryo.slice(0, 6000) : "",
       parcalar: typeof row?.parcalar === "string" ? row.parcalar.slice(0, 4000) : "",
       anlatim: typeof row?.anlatim === "string" ? row.anlatim.slice(0, 500) : "",
+      onceki: typeof row?.onceki === "string" ? row.onceki.slice(0, 500) : "yok",
       gorsel_prompt: typeof row?.gorsel === "string" ? row.gorsel.slice(0, 700) : "",
       ses: typeof row?.ses === "string" ? row.ses : "Ultra Epic",
       hız: "1.00×",
@@ -230,11 +231,16 @@ export const produceStep = createServerFn({ method: "POST" })
     };
     let text = await ask("");
     let parsed = text ? readModelJson(text) : null;
-    let accepted = parsed ? acceptStep(step, parsed) : null;
+    const ctx = { konu: vars.konu, anlatim: vars.anlatim };
+    let accepted = parsed ? acceptStep(step, parsed, ctx) : null;
     if (!accepted) {
-      text = await ask("Önceki yanıt bozuktu. Yalnızca şemadaki JSON'u ver, başka cümle yazma.");
+      const why =
+        parsed && (step === "gorsel" || step === "video")
+          ? mediaPromptProblem(step, parsed, ctx)
+          : "Önceki yanıt bozuktu. Yalnızca şemadaki JSON'u ver, başka cümle yazma.";
+      text = await ask(why || "Önceki yanıt bozuktu. Yalnızca şemadaki JSON'u ver, başka cümle yazma.");
       parsed = text ? readModelJson(text) : null;
-      accepted = parsed ? acceptStep(step, parsed) : null;
+      accepted = parsed ? acceptStep(step, parsed, ctx) : null;
     }
     if (!accepted) return { ok: false as const, error: "Bu adımın JSON'u okunamadı. Yine dene." };
     return { ok: true as const, label: route.label, step, ...accepted };

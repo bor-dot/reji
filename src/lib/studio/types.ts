@@ -72,6 +72,7 @@ export type Scene = {
   audioDuration?: number;
   route?: "xai" | "gemini" | "elle";
   spoken?: string;
+  summary?: string;
   seconds?: number;
   mediaKind?: "video" | "gorsel";
 };

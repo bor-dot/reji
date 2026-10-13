@@ -243,26 +243,50 @@ export function ProduceScreen({
           patch(step, { status: index + 1 >= scenes.length ? "bitti" : "bekliyor", source: channel.name, detail: "Bu sahne görsel. Video yok.", preview: scene.title });
           return;
         }
-        const asked = await withTimeout(
-          stepCall({
-            data: {
-              step,
-              ...fields({
-                anlatim: scene.spoken || scene.title,
-                gorsel: scene.imagePrompt,
-              }),
-            },
-          }),
-          180_000,
-        );
-        if (!fresh()) return;
-        if (!asked.ok) throw new Error(asked.error);
-        if (!("prompt" in asked) || !asked.prompt) throw new Error("Prompt gelmedi.");
-        const prompt = asked.prompt;
-        const nextPrompt = scenes.map((item, itemIndex) =>
-          itemIndex === index ? { ...item, ...(step === "gorsel" ? { imagePrompt: prompt } : { videoPrompt: prompt }) } : item,
-        );
-        patchPack(project.id, { scenes: nextPrompt });
+        const ready = step === "gorsel" ? scene.imagePrompt : scene.videoPrompt;
+        let prompt = ready;
+        let ozet = scene.summary ?? "";
+        if (!ready) {
+          const onceki = scenes
+            .slice(0, index)
+            .map((item) => item.summary)
+            .filter(Boolean)
+            .join(" | ");
+          const asked = await withTimeout(
+            stepCall({
+              data: {
+                step,
+                ...fields({
+                  anlatim: scene.spoken || scene.title,
+                  gorsel: scene.imagePrompt,
+                  onceki: onceki || "yok",
+                }),
+              },
+            }),
+            180_000,
+          );
+          if (!fresh()) return;
+          if (!asked.ok) throw new Error(asked.error);
+          if (!("prompt" in asked) || !asked.prompt) throw new Error("Prompt gelmedi.");
+          prompt = asked.prompt;
+          ozet = "konu_ozeti" in asked && asked.konu_ozeti ? asked.konu_ozeti : scene.title;
+          const drafted = scenes.map((item, itemIndex) =>
+            itemIndex === index
+              ? { ...item, summary: ozet, ...(step === "gorsel" ? { imagePrompt: prompt } : { videoPrompt: prompt }) }
+              : item,
+          );
+          patchPack(project.id, { scenes: drafted });
+          if (!auto) {
+            patch(step, {
+              status: "bekliyor",
+              ms: Date.now() - started,
+              source: asked.label,
+              preview: "",
+              detail: ozet,
+            });
+            return;
+          }
+        }
         const res = await withTimeout(
           media({
             data: {
@@ -281,7 +305,13 @@ export function ProduceScreen({
         if (!fresh()) return;
         if (!res.ok) throw new Error(res.copy ? `${res.error} ${prompt}` : res.error);
         const nextScenes = scenes.map((item, itemIndex) =>
-          itemIndex === index ? { ...item, ...(step === "gorsel" ? { imageUrl: res.url } : { videoUrl: res.url }) } : item,
+          itemIndex === index
+            ? {
+                ...item,
+                summary: ozet || item.summary,
+                ...(step === "gorsel" ? { imagePrompt: prompt, imageUrl: res.url } : { videoPrompt: prompt, videoUrl: res.url }),
+              }
+            : item,
         );
         patchPack(project.id, { scenes: nextScenes });
         if (step === "gorsel") setImageAt(index + 1);
@@ -292,7 +322,7 @@ export function ProduceScreen({
           ms: Date.now() - started,
           source: res.source,
           preview: res.url,
-          detail: `${index + 1}/${scenes.length} · ${scene.title}`,
+          detail: `${index + 1}/${scenes.length} · ${ozet || scene.summary || scene.title}`,
         });
         return;
       }
@@ -530,8 +560,9 @@ export function ProduceScreen({
                 ) : null}
               </div>
             ) : null}
-            {step === "gorsel" ? <p className="mt-2 text-sm text-faint">Sıradaki {Math.min(imageAt + 1, scenes.length)} / {scenes.length}</p> : null}
-            {step === "video" ? <p className="mt-2 text-sm text-faint">Sıradaki {Math.min(videoAt + 1, scenes.length)} / {scenes.length}</p> : null}
+            {step === "gorsel" || step === "video" ? (
+              <p className="mt-2 text-sm text-fg">{scenes[step === "gorsel" ? imageAt : videoAt]?.summary || "Özet, çizimden önce burada durur."}</p>
+            ) : null}
             {step === "ses" ? <p className="mt-2 text-sm text-faint">{cast.sesle} · 1.00×</p> : null}
             {current.preview.startsWith("data:image") || current.preview.startsWith("http") ? (
               <img src={current.preview} alt="" className="mt-3 aspect-video w-full max-w-md rounded-lg object-cover" />
@@ -552,8 +583,27 @@ export function ProduceScreen({
             ) : null}
             <div className="mt-4 flex flex-wrap gap-2">
               <Button disabled={busy} onClick={() => void runStep()}>
-                {busy ? "Yazıyor…" : stepLabel(step, speechReady, imageAt, videoAt, voiceAt)}
+                {busy ? "Yazıyor…" : stepLabel(step, speechReady, imageAt, videoAt, voiceAt, scenes)}
               </Button>
+              {step === "gorsel" || step === "video" ? (
+                <Button
+                  variant="line"
+                  disabled={busy}
+                  onClick={() => {
+                    const index = step === "gorsel" ? imageAt : videoAt;
+                    patchPack(project.id, {
+                      scenes: scenes.map((item, itemIndex) =>
+                        itemIndex === index
+                          ? { ...item, summary: undefined, ...(step === "gorsel" ? { imagePrompt: "" } : { videoPrompt: "" }) }
+                          : item,
+                      ),
+                    });
+                    patch(step, { status: "bekliyor", detail: "", preview: "" });
+                  }}
+                >
+                  Özeti yeniden yaz
+                </Button>
+              ) : null}
               {cursor < STEPS.length - 1 ? (
                 <Button variant="line" disabled={busy} onClick={() => setCursor(cursor + 1)}>
                   Sonraki adım
@@ -575,14 +625,21 @@ function previewOf(id: string, pack: Pack) {
   return "";
 }
 
-function stepLabel(step: StepId, speechReady: boolean, imageAt: number, videoAt: number, voiceAt: number) {
+function stepLabel(
+  step: StepId,
+  speechReady: boolean,
+  imageAt: number,
+  videoAt: number,
+  voiceAt: number,
+  scenes: { imagePrompt: string; videoPrompt: string }[],
+) {
   if (step === "baslik") return "Başlığı Grok yazsın";
   if (step === "kanca") return "Kancayı Grok yazsın";
   if (step === "senaryo") return "Senaryoyu Grok yazsın";
   if (step === "metin") return "Metni Grok yazsın";
   if (step === "sahneler") return "Sahne listesini Grok yazsın";
-  if (step === "gorsel") return imageAt === 0 ? "İlk görseli çiz" : "Sıradaki görseli çiz";
-  if (step === "video") return videoAt === 0 ? "İlk videoyu çek" : "Sıradaki videoyu çek";
+  if (step === "gorsel") return scenes[imageAt]?.imagePrompt ? "Bunu çiz" : "Ne çizileceğini yaz";
+  if (step === "video") return scenes[videoAt]?.videoPrompt ? "Bunu çek" : "Ne çekileceğini yaz";
   if (step === "ses") return !speechReady || voiceAt === 0 ? "Onayla ve seslendir" : "Sıradaki parçayı oku";
   if (step === "kapak") return "Kapağı çiz";
   return "Puanı hesapla";
