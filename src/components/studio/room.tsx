@@ -11,6 +11,7 @@ import { notify } from "@/lib/studio/toast";
 import { formatLabel, type Beat, type Hook, type Pack, type Project, type Scene, type Shot } from "@/lib/studio/types";
 import { Button, Chip, CopyButton, fieldClass } from "./bits";
 import { KarevoSend } from "./karevo";
+import { ProduceScreen } from "./produce";
 import { VoiceStage } from "./voice";
 
 const STAGES = [
@@ -180,6 +181,7 @@ export function Room({ project }: { project: Project }) {
   const [writeLabel, setWriteLabel] = useState("");
   const [error, setError] = useState("");
   const [armRebuild, setArmRebuild] = useState(false);
+  const [producing, setProducing] = useState(false);
   const channel = channels.find((item) => item.id === project.channelId) ?? channels[0];
   const blocked = Boolean(channel && needsSources(channel) && !(project.brief.sources ?? "").trim());
 
@@ -299,6 +301,18 @@ export function Room({ project }: { project: Project }) {
             <Button variant="line" onClick={onRebuild} disabled={busy}>
               {armRebuild ? "Grok metninin üstüne yaz" : "Kalıbı kur"}
             </Button>
+            <Button
+              onClick={() => {
+                if (blocked) {
+                  refuseSources();
+                  return;
+                }
+                setProducing(true);
+              }}
+              disabled={busy}
+            >
+              Tek tuşla üret
+            </Button>
             <Button onClick={() => void onGrok()} disabled={busy}>
               {busy ? writeLabel || "Yazıyor…" : "Grok ile yaz"}
             </Button>
@@ -317,6 +331,9 @@ export function Room({ project }: { project: Project }) {
       </header>
 
       <StageDock stage={stage} onPick={setStage} />
+      {producing && channel ? (
+        <ProduceScreen project={project} channel={channel} onClose={() => setProducing(false)} />
+      ) : null}
 
       <div className="grid gap-6 lg:grid-cols-[12rem_minmax(0,1fr)] lg:gap-8">
         <nav className="hidden flex-col gap-1 lg:flex" aria-label="Aşamalar">

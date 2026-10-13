@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, sep } from "node:path";
@@ -195,4 +196,97 @@ export async function writeKarevoPackage(folderName: string, pack: KarevoPackage
   await writeFile(join(dest, "karevo-paket.json"), `${JSON.stringify(json, null, 2)}\n`);
   await writeFile(join(dest, "altyazi.srt"), `${srt.join("\n\n")}\n`);
   return dest;
+}
+
+export type ShootFile = {
+  n: number;
+  title: string;
+  text: string;
+  simulation: boolean;
+  duration: number;
+  imageUrl?: string;
+  videoUrl?: string;
+  audioBase64?: string;
+};
+
+export async function writeShootFiles(input: {
+  folderName: string;
+  name: string;
+  channel: string;
+  resolution: string;
+  scenes: ShootFile[];
+}): Promise<{ ok: true; path: string } | { ok: false; error: string }> {
+  if (!input.folderName || input.folderName.includes("..") || input.folderName.includes("/") || input.folderName.includes("\\")) {
+    return { ok: false, error: "Proje adı klasöre yazılamıyor." };
+  }
+  const root = exportRoot();
+  const dest = join(root, input.folderName);
+  if (!dest.startsWith(root + sep)) return { ok: false, error: "Klasör adı güvenli değil." };
+  const media = join(dest, "medya");
+  await mkdir(media, { recursive: true });
+  let cursor = 0;
+  const srt: string[] = [];
+  const rows = [];
+  for (const scene of input.scenes) {
+    const nn = pad(scene.n);
+    const duration = scene.duration > 0 ? scene.duration : 6;
+    let imageName: string | null = null;
+    let videoName: string | null = null;
+    let audioName: string | null = null;
+    if (scene.imageUrl) {
+      const image = await pull(scene.imageUrl, MAX_IMAGE);
+      const ext = "error" in image ? null : imageExt(image.bytes, image.type);
+      if (!("error" in image) && ext) {
+        imageName = `${nn}-gorsel.${ext}`;
+        await writeFile(join(media, imageName), image.bytes);
+      }
+    }
+    if (scene.videoUrl) {
+      const video = await pull(scene.videoUrl, MAX_VIDEO);
+      if (!("error" in video)) {
+        videoName = `${nn}-video.mp4`;
+        await writeFile(join(media, videoName), video.bytes);
+      }
+    }
+    if (scene.audioBase64) {
+      const audio = Buffer.from(scene.audioBase64, "base64");
+      if (audio.length > 32 && audio.length <= MAX_AUDIO) {
+        audioName = `${nn}.mp3`;
+        await writeFile(join(media, audioName), audio);
+      }
+    }
+    const start = cursor;
+    cursor += duration;
+    const body = scene.text.replace(/\r\n/g, "\n").trim();
+    if (body) srt.push(`${scene.n}\n${srtStamp(start)} --> ${srtStamp(cursor)}\n${body}`);
+    rows.push({
+      sira: scene.n,
+      baslik: scene.title,
+      metin: scene.text,
+      gorsel: imageName ? `medya/${imageName}` : null,
+      video: videoName ? `medya/${videoName}` : null,
+      ses: audioName ? `medya/${audioName}` : null,
+      sesSuresi: Math.round(duration * 1000) / 1000,
+      yapayZekaSimulasyonu: scene.simulation,
+    });
+  }
+  await writeFile(
+    join(dest, "karevo-paket.json"),
+    `${JSON.stringify({ projeAdi: input.name, kanal: input.channel, cozunurluk: input.resolution, fps: 24, sahneler: rows }, null, 2)}\n`,
+  );
+  await writeFile(join(dest, "altyazi.srt"), `${srt.join("\n\n")}\n`);
+  return { ok: true, path: displayPath(dest) };
+}
+
+export function openExportFolder(folderName: string): Promise<{ ok: true; path: string } | { ok: false; error: string }> {
+  if (!folderName || folderName.includes("..") || folderName.includes("/") || folderName.includes("\\")) {
+    return Promise.resolve({ ok: false, error: "Klasör yok." });
+  }
+  const dest = join(exportRoot(), folderName);
+  const bin = process.platform === "darwin" ? "open" : "xdg-open";
+  return new Promise((resolve) => {
+    execFile(bin, [dest], { timeout: 5_000 }, () => {
+      resolve({ ok: true, path: displayPath(dest) });
+    });
+  });
 }

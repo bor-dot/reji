@@ -589,6 +589,21 @@ export async function chooseTextRoute(input: {
   return { ok: true, via, label: sourceLabel(via) };
 }
 
+export async function chooseProduceText(input: {
+  model: string;
+  sealed?: { iv: string; ciphertext: string };
+}): Promise<{ ok: true; via: "api" | CliId; label: string; model: string } | { ok: false; error: string }> {
+  const probe = await probeClis({ fresh: true });
+  const bagli = new Set(probe.items.filter((row) => row.status === "bagli").map((row) => row.id));
+  for (const id of ["grok", "codex", "claude", "gemini"] as const) {
+    if (bagli.has(id)) return { ok: true, via: id, label: sourceLabel(id), model: input.model };
+  }
+  const provider = TEXT_MODELS[input.model] ?? "xai";
+  if (resolveKey(provider, input.sealed)) return { ok: true, via: "api", label: "API", model: input.model };
+  if (resolveKey("xai", input.sealed)) return { ok: true, via: "api", label: "API", model: "grok-4.5" };
+  return { ok: false, error: "Metin kaynağı yok. Grok CLI ya da API gerekli." };
+}
+
 export async function runCliText(cli: CliId, prompt: string) {
   if (!CLI_FALLBACK.includes(cli)) return { ok: false as const, error: "CLI yok." };
   const bin = await findBin(cli);
