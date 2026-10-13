@@ -168,3 +168,116 @@ export const openShoot = createServerFn({ method: "POST" })
     const folder = typeof row?.folderName === "string" ? row.folderName : "";
     return openExportFolder(folder);
   });
+
+function readJson(text: string): Record<string, unknown> | null {
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start < 0 || end <= start) return null;
+  try {
+    return asRecord(JSON.parse(text.slice(start, end + 1)));
+  } catch {
+    return null;
+  }
+}
+
+function clip(value: unknown, max: number, fallback: string) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  const base = text || fallback;
+  return base.length <= max ? base : `${base.slice(0, max - 1).trimEnd()}…`;
+}
+
+export const produceStep = createServerFn({ method: "POST" })
+  .validator((input: unknown) => input)
+  .handler(async ({ data }) => {
+    const row = asRecord(data);
+    const step = row?.step === "kanca" || row?.step === "senaryo" ? row.step : "baslik";
+    const title = typeof row?.title === "string" ? row.title.slice(0, 120) : "";
+    if (title.length < 2) return { ok: false as const, error: "Başlık yok." };
+    const language = row?.language === "en" ? "English" : "Turkish";
+    const brief = [
+      `Working title: ${title}`,
+      `Promise: ${typeof row?.promise === "string" ? row.promise.slice(0, 400) : ""}`,
+      `Audience: ${typeof row?.audience === "string" ? row.audience.slice(0, 80) : ""}`,
+      `Tone: ${typeof row?.tone === "string" ? row.tone.slice(0, 40) : ""}`,
+      `Minutes: ${typeof row?.minutes === "number" ? row.minutes : 8}`,
+      `Format: ${typeof row?.format === "string" ? row.format : "uzun"}`,
+      typeof row?.sources === "string" && row.sources.trim() ? `Sources:\n${row.sources.slice(0, 1500)}` : "",
+      typeof row?.channelNote === "string" ? row.channelNote.slice(0, 500) : "",
+      typeof row?.pickedTitle === "string" ? `Chosen title: ${row.pickedTitle.slice(0, 120)}` : "",
+      typeof row?.hook === "string" ? `Chosen hook: ${row.hook.slice(0, 300)}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+    const system =
+      step === "baslik"
+        ? `You are a senior YouTube titler. Write in ${language}. Return only JSON {"titles":[{"text","angle","why"}]}. Exactly 4 titles. No script, no scenes. Thumbnail words stay out. A title is speakable and does not fake curiosity.`
+        : step === "kanca"
+          ? `You are a senior YouTube opener. Write in ${language}. Return only JSON {"hooks":[{"window","line","visual","cut"}]}. Exactly 3 hooks. window is a short range like 0:00-0:08. line is spoken. visual and cut are directing, not spoken. No full script.`
+          : `You are a senior YouTube editor. Write in ${language}. Return only JSON {"beats":[{"time","title","voice","screen","visual"}]}. 5 to 7 beats covering the film. time is m:ss. voice is one spoken sentence, not the full narration. screen and visual are directing notes. Do not write the whole script.`;
+    const { chooseProduceText, completeText, runCliText } = await import("./ai-runtime");
+    const route = await chooseProduceText({
+      model: typeof row?.model === "string" ? row.model : "grok-4.5",
+      sealed: sealedOf(row?.sealed),
+    });
+    if (!route.ok) return route;
+    const written =
+      route.via === "api"
+        ? await completeText({
+            model: route.model,
+            system,
+            user: brief,
+            sealed: sealedOf(row?.sealed),
+            json: true,
+            maxTokens: step === "senaryo" ? 2200 : 1200,
+          })
+        : await runCliText(route.via, `${system}\n\n${brief}`);
+    if (!written.ok) return { ok: false as const, error: written.error };
+    const parsed = readJson(written.text);
+    if (!parsed) return { ok: false as const, error: "Bu adım eksik döndü. Yine dene." };
+    if (step === "baslik") {
+      const titles = (Array.isArray(parsed.titles) ? parsed.titles : [])
+        .map((item) => {
+          const beat = asRecord(item);
+          if (!beat) return null;
+          return { text: clip(beat.text, 120, title), angle: clip(beat.angle, 40, "açı"), why: clip(beat.why, 280, "Vaadi taşır.") };
+        })
+        .filter((item): item is { text: string; angle: string; why: string } => Boolean(item))
+        .slice(0, 5);
+      if (titles.length < 3) return { ok: false as const, error: "Başlıklar eksik. Yine dene." };
+      return { ok: true as const, label: route.label, titles };
+    }
+    if (step === "kanca") {
+      const hooks = (Array.isArray(parsed.hooks) ? parsed.hooks : [])
+        .map((item) => {
+          const beat = asRecord(item);
+          if (!beat) return null;
+          return {
+            window: clip(beat.window, 24, "0:00-0:08"),
+            line: clip(beat.line, 400, title),
+            visual: clip(beat.visual, 240, "Tek plan."),
+            cut: clip(beat.cut, 180, "Kes."),
+          };
+        })
+        .filter((item): item is { window: string; line: string; visual: string; cut: string } => Boolean(item))
+        .slice(0, 4);
+      if (hooks.length < 2) return { ok: false as const, error: "Kancalar eksik. Yine dene." };
+      return { ok: true as const, label: route.label, hooks };
+    }
+    const beats = (Array.isArray(parsed.beats) ? parsed.beats : [])
+      .map((item) => {
+        const beat = asRecord(item);
+        if (!beat) return null;
+        return {
+          time: clip(beat.time, 16, "0:00"),
+          title: clip(beat.title, 80, "Sahne"),
+          voice: clip(beat.voice, 400, "…"),
+          screen: clip(beat.screen, 160, "Anlatı"),
+          visual: clip(beat.visual, 240, "Tek plan."),
+        };
+      })
+      .filter((item): item is { time: string; title: string; voice: string; screen: string; visual: string } => Boolean(item))
+      .slice(0, 8);
+    if (beats.length < 4) return { ok: false as const, error: "Senaryo eksik. Yine dene." };
+    return { ok: true as const, label: route.label, beats };
+  });
+

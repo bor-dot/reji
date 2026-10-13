@@ -311,7 +311,7 @@ export function Room({ project }: { project: Project }) {
               }}
               disabled={busy}
             >
-              Tek tuşla üret
+              Adım adım
             </Button>
             <Button onClick={() => void onGrok()} disabled={busy}>
               {busy ? writeLabel || "Yazıyor…" : "Grok ile yaz"}
