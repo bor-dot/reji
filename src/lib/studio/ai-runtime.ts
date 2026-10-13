@@ -429,3 +429,119 @@ export async function probeClis(): Promise<{ platform: string; items: CliProbe[]
   }
   return { platform: process.platform, items };
 }
+
+export async function geminiImage(prompt: string, model: string, sealed?: { iv: string; ciphertext: string }) {
+  const key = resolveKey("gemini", sealed);
+  if (!key) return { ok: false as const, error: "Görsel için Gemini anahtarı yok." };
+  const chosen = model.startsWith("imagen") || model.startsWith("gemini") ? model : "gemini-2.5-flash-image";
+  try {
+    if (chosen.startsWith("imagen")) {
+      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${chosen}:predict`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-goog-api-key": key },
+        body: JSON.stringify({
+          instances: [{ prompt: prompt.slice(0, 1800) }],
+          parameters: { sampleCount: 1, aspectRatio: "16:9" },
+        }),
+      });
+      if (!res.ok) return { ok: false as const, error: clipError(res.status, await res.text()) };
+      const body = (await res.json()) as { predictions?: { bytesBase64Encoded?: string; mimeType?: string }[] };
+      const row = body.predictions?.[0];
+      if (!row?.bytesBase64Encoded) return { ok: false as const, error: "Görsel gelmedi." };
+      return { ok: true as const, url: `data:${row.mimeType || "image/png"};base64,${row.bytesBase64Encoded}` };
+    }
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${chosen}:generateContent`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-goog-api-key": key },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt.slice(0, 1800) }] }],
+        generationConfig: { responseModalities: ["IMAGE"] },
+      }),
+    });
+    if (!res.ok) return { ok: false as const, error: clipError(res.status, await res.text()) };
+    const body = (await res.json()) as {
+      candidates?: { content?: { parts?: { inlineData?: { mimeType?: string; data?: string } }[] } }[];
+    };
+    const inline = body.candidates?.[0]?.content?.parts?.find((part) => part.inlineData?.data)?.inlineData;
+    if (!inline?.data) return { ok: false as const, error: "Görsel gelmedi." };
+    return { ok: true as const, url: `data:${inline.mimeType || "image/png"};base64,${inline.data}` };
+  } catch {
+    return { ok: false as const, error: "Gemini görsel isteği koptu." };
+  }
+}
+
+export async function startVeo(prompt: string, resolution: "720p" | "1080p", sealed?: { iv: string; ciphertext: string }) {
+  const key = resolveKey("gemini", sealed);
+  if (!key) return { ok: false as const, error: "Video için Gemini anahtarı yok." };
+  try {
+    const res = await fetch(
+      "https://generativelanguage.googleapis.com/v1beta/models/veo-3.1-lite-generate-preview:predictLongRunning",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-goog-api-key": key },
+        body: JSON.stringify({
+          instances: [{ prompt: prompt.slice(0, 1800) }],
+          parameters: { sampleCount: 1, durationSeconds: 8, aspectRatio: "16:9", resolution },
+        }),
+      },
+    );
+    if (!res.ok) return { ok: false as const, error: clipError(res.status, await res.text()) };
+    const body = (await res.json()) as { name?: string };
+    if (!body.name) return { ok: false as const, error: "Veo isteği açılmadı." };
+    return { ok: true as const, requestId: body.name };
+  } catch {
+    return { ok: false as const, error: "Veo isteği koptu." };
+  }
+}
+
+export async function pollVeo(name: string, sealed?: { iv: string; ciphertext: string }) {
+  const key = resolveKey("gemini", sealed);
+  if (!key) return { ok: false as const, error: "Video için Gemini anahtarı yok." };
+  if (!name || name.includes("..") || !/^[\w./:-]+$/.test(name)) return { ok: false as const, error: "Geçersiz istek." };
+  try {
+    const url = name.startsWith("http") ? name : `https://generativelanguage.googleapis.com/v1beta/${name}`;
+    const res = await fetch(url, { headers: { "x-goog-api-key": key } });
+    if (!res.ok) return { ok: false as const, error: clipError(res.status, await res.text()) };
+    const body = (await res.json()) as {
+      done?: boolean;
+      error?: { message?: string };
+      response?: {
+        generateVideoResponse?: { generatedSamples?: { video?: { uri?: string } }[] };
+        generatedVideos?: { video?: { uri?: string } }[];
+      };
+    };
+    if (body.error?.message) return { ok: false as const, error: body.error.message.slice(0, 180) };
+    if (!body.done) return { ok: true as const, status: "pending" as const };
+    const uri =
+      body.response?.generateVideoResponse?.generatedSamples?.[0]?.video?.uri ||
+      body.response?.generatedVideos?.[0]?.video?.uri;
+    if (!uri) return { ok: false as const, error: "Video adresi gelmedi." };
+    const file = await fetch(uri, { headers: { "x-goog-api-key": key } });
+    if (!file.ok) return { ok: false as const, error: clipError(file.status, await file.text()) };
+    const bytes = Buffer.from(await file.arrayBuffer());
+    if (bytes.length < 32 || bytes.length > 12_000_000) return { ok: false as const, error: "Video dosyası kullanılamadı." };
+    return { ok: true as const, status: "done" as const, url: `data:video/mp4;base64,${bytes.toString("base64")}` };
+  } catch {
+    return { ok: false as const, error: "Veo durumu okunamadı." };
+  }
+}
+
+export async function completeWithCli(id: "grok" | "codex" | "claude" | "gemini", prompt: string) {
+  const bin = await findBin(id);
+  if (!bin) return { ok: false as const, error: `${id} kurulu değil.` };
+  const args = id === "codex" ? ["exec", "--skip-git-repo-check", prompt] : ["-p", prompt];
+  const result = await new Promise<{ code: number; out: string }>((resolve) => {
+    execFile(
+      bin,
+      args,
+      { timeout: 180_000, maxBuffer: 8_000_000, env: { ...process.env, NO_COLOR: "1" } },
+      (error, stdout, stderr) => {
+        const code = typeof error?.code === "number" ? error.code : error ? 1 : 0;
+        resolve({ code, out: `${stdout}\n${stderr}`.slice(0, 200_000) });
+      },
+    );
+  });
+  const text = result.out.trim();
+  if (!text || loggedOut(text)) return { ok: false as const, error: `${id} yanıt vermedi. Giriş gerekebilir.` };
+  return { ok: true as const, text };
+}

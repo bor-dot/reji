@@ -27,13 +27,28 @@ export type ModelPrefs = {
   text: string;
   image: string;
   video: string;
+  videoSize: "720p" | "1080p";
+  writer: "api" | "grok" | "codex" | "claude" | "gemini";
 };
 
 export const DEFAULT_MODELS: ModelPrefs = {
   text: "grok-4.5",
   image: "grok-imagine-image",
   video: "grok-imagine-video-1.5-lite",
+  videoSize: "720p",
+  writer: "api",
 };
+
+function modelsOf(raw?: Partial<ModelPrefs>): ModelPrefs {
+  const writer = raw?.writer;
+  const allowed = writer === "grok" || writer === "codex" || writer === "claude" || writer === "gemini" || writer === "api";
+  return {
+    ...DEFAULT_MODELS,
+    ...raw,
+    videoSize: raw?.videoSize === "1080p" ? "1080p" : "720p",
+    writer: allowed ? writer : "api",
+  };
+}
 
 type Saved = {
   channels: Channel[];
@@ -103,7 +118,7 @@ function load(): Saved | null {
         channels: channels.length ? channels : DEFAULT_CHANNELS,
         projects,
         activeId: typeof data.activeId === "string" ? data.activeId : channels[0]?.id ?? DEFAULT_CHANNELS[0].id,
-        models: { ...DEFAULT_MODELS, ...(data.models ?? {}) },
+        models: modelsOf(data.models),
         keys: Array.isArray(data.keys) ? data.keys.filter((key) => key?.iv && key?.ciphertext && key?.provider) : [],
       };
     }
@@ -310,7 +325,7 @@ export function StudioProvider({ children }: { children: ReactNode }) {
             channels: list,
             projects,
             activeId: list.some((channel) => channel.id === next.activeId) ? next.activeId : list[0].id,
-            models: { ...DEFAULT_MODELS, ...(next.models ?? {}) },
+            models: modelsOf(next.models),
             keys: Array.isArray(next.keys)
               ? next.keys.filter((key) => key?.iv && key?.ciphertext && key?.provider)
               : [],

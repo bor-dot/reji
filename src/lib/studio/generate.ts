@@ -201,6 +201,7 @@ export const deepenPack = createServerFn({ method: "POST" })
         ? { iv: sealed.iv, ciphertext: sealed.ciphertext }
         : undefined;
     const channelNote = typeof record?.channelNote === "string" ? record.channelNote.slice(0, 800) : "";
+    const writer = record?.writer === "grok" || record?.writer === "codex" || record?.writer === "claude" || record?.writer === "gemini" ? record.writer : "api";
 
     const lang = brief.language === "en" ? "English" : "Turkish";
     const system = [
@@ -213,6 +214,7 @@ export const deepenPack = createServerFn({ method: "POST" })
       "For shorts: spoken draft fits about 45 seconds, one claim, a loop back to the first frame.",
       "Voice lines are speakable. Directing notes go in visual, cut, face, layout — not in voice.",
       "Thumbnail words: at most 5, and they must not repeat the video title.",
+      `Spoken voice across the beats of this first section should be about ${Math.min(700, Math.max(120, Math.round((brief.minutes <= 5 ? 650 : brief.minutes <= 10 ? 1300 : brief.minutes <= 20 ? 2600 : 3900) / 3)))} words. Stop at a clean beat if the full runtime is longer.`,
       "Chapters start at 0:00 and match beat times.",
       "shot.n is a short string. shot.must is a boolean. Put constraints in do, not in must.",
       "Schema keys: titles[{text,angle,why}], hooks[{window,line,visual,cut}], beats[{time,title,voice,screen,visual}], shots[{n,kind,frame,do,sec,must}], thumb{words,face,layout,contrast,ban}, seo{description,chapters[{time,title}],tags,pinned,end}.",
@@ -223,18 +225,33 @@ export const deepenPack = createServerFn({ method: "POST" })
       .join(" ");
 
     try {
-      const { completeText } = await import("./ai-runtime");
-      const result = await completeText({
-        model: textModel,
-        system,
-        user: JSON.stringify(brief),
-        sealed: sealedKey,
-        json: true,
-      });
+      const { completeText, completeWithCli, probeClis } = await import("./ai-runtime");
+      const user = JSON.stringify(brief);
+      const prompt = `${system}\n\n${user}`;
+      let result: { ok: true; text: string } | { ok: false; error: string };
+      if (writer !== "api") {
+        const probe = await probeClis();
+        const item = probe.items.find((row) => row.id === writer);
+        if (item?.status !== "bagli") return { ok: false, error: `${writer} bağlı değil.` };
+        result = await completeWithCli(writer, prompt);
+      } else {
+        result = await completeText({ model: textModel, system, user, sealed: sealedKey, json: true });
+        if (!result.ok && /anahtar yok/i.test(result.error)) {
+          const probe = await probeClis();
+          const item = probe.items.find((row) => row.status === "bagli");
+          if (item) result = await completeWithCli(item.id, prompt);
+        }
+      }
       if (!result.ok) return { ok: false, error: result.error };
-      const pack = parseGeneratedPack(extractJson(result.text));
+      let parsedPack: ReturnType<typeof extractJson>;
+      try {
+        parsedPack = extractJson(result.text);
+      } catch {
+        return { ok: false, error: "Metin kesildi. Senaryoda Devam et ile sürdür." };
+      }
+      const pack = parseGeneratedPack(parsedPack);
       if (!pack.success) {
-        return { ok: false, error: "Paket eksik döndü. Tekrar dene ya da masa kalıbında kal." };
+        return { ok: false, error: "Paket eksik döndü. Senaryoda Devam et ya da masa kalıbında kal." };
       }
       return { ok: true, pack: pack.data };
     } catch {
@@ -281,8 +298,15 @@ export const imagineScene = createServerFn({ method: "POST" })
     const model = typeof row?.model === "string" ? row.model : "grok-imagine-image";
     if (prompt.length < 8) return { ok: false as const, error: "Prompt kısa." };
     const sealed = SealedSchema.safeParse(row?.sealed);
+    const key = sealed.success ? sealed.data : undefined;
+    const route = row?.route === "gemini" ? "gemini" : "xai";
+    if (route === "gemini") {
+      const { geminiImage } = await import("./ai-runtime");
+      const chosen = model.startsWith("imagen") || model.startsWith("gemini") ? model : "gemini-2.5-flash-image";
+      return geminiImage(prompt, chosen, key);
+    }
     const { imagineImage } = await import("./ai-runtime");
-    return imagineImage(prompt, model, sealed.success ? sealed.data : undefined);
+    return imagineImage(prompt, model, key);
   });
 
 export const startSceneVideo = createServerFn({ method: "POST" })
@@ -293,8 +317,14 @@ export const startSceneVideo = createServerFn({ method: "POST" })
     const model = typeof row?.model === "string" ? row.model : "grok-imagine-video-1.5-lite";
     if (prompt.length < 8) return { ok: false as const, error: "Prompt kısa." };
     const sealed = SealedSchema.safeParse(row?.sealed);
+    const key = sealed.success ? sealed.data : undefined;
+    const route = row?.route === "gemini" ? "gemini" : "xai";
+    if (route === "gemini") {
+      const { startVeo } = await import("./ai-runtime");
+      return startVeo(prompt, row?.resolution === "1080p" ? "1080p" : "720p", key);
+    }
     const { startVideo } = await import("./ai-runtime");
-    return startVideo(prompt, model, sealed.success ? sealed.data : undefined);
+    return startVideo(prompt, model, key);
   });
 
 export const pollSceneVideo = createServerFn({ method: "POST" })
@@ -303,8 +333,13 @@ export const pollSceneVideo = createServerFn({ method: "POST" })
     const row = asRecord(data);
     const requestId = typeof row?.requestId === "string" ? row.requestId : "";
     const sealed = SealedSchema.safeParse(row?.sealed);
+    const key = sealed.success ? sealed.data : undefined;
+    if (row?.route === "gemini") {
+      const { pollVeo } = await import("./ai-runtime");
+      return pollVeo(requestId, key);
+    }
     const { pollVideo } = await import("./ai-runtime");
-    return pollVideo(requestId, sealed.success ? sealed.data : undefined);
+    return pollVideo(requestId, key);
   });
 
 export const probeLocalClis = createServerFn({ method: "GET" }).handler(async () => {
@@ -329,4 +364,138 @@ export const speakScript = createServerFn({ method: "POST" })
       language,
       sealed: sealed.success ? sealed.data : undefined,
     });
+  });
+
+export const sendToKarevo = createServerFn({ method: "POST" })
+  .validator((input: unknown) => input)
+  .handler(async ({ data }) => {
+    const row = asRecord(data);
+    const scenes = Array.isArray(row?.scenes) ? row.scenes : [];
+    if (!row || typeof row.folderName !== "string" || typeof row.name !== "string" || scenes.length === 0) {
+      return { ok: false as const, error: "Paket boş.", missing: [] as string[] };
+    }
+    const { sendKarevo } = await import("./karevo-write");
+    const parsed = [];
+    for (const item of scenes.slice(0, 24)) {
+      const scene = asRecord(item);
+      if (!scene || typeof scene.n !== "number" || typeof scene.imageUrl !== "string" || typeof scene.audioBase64 !== "string") {
+        return { ok: false as const, error: "Paket eksik.", missing: ["Bir sahne okunamadı."] };
+      }
+      parsed.push({
+        n: scene.n,
+        title: typeof scene.title === "string" ? scene.title : "Sahne",
+        text: typeof scene.text === "string" ? scene.text : "",
+        simulation: scene.simulation === true,
+        duration: typeof scene.duration === "number" ? scene.duration : 0,
+        imageUrl: scene.imageUrl,
+        videoUrl: typeof scene.videoUrl === "string" && scene.videoUrl ? scene.videoUrl : undefined,
+        audioBase64: scene.audioBase64,
+      });
+    }
+    return sendKarevo({
+      folderName: row.folderName,
+      name: row.name,
+      channel: typeof row.channel === "string" ? row.channel : "Kanal",
+      resolution: typeof row.resolution === "string" ? row.resolution : "1920x1080",
+      scenes: parsed,
+    });
+  });
+
+const ContinueBeat = z.object({
+  time: z.string().min(1).max(16),
+  title: z.string().min(1).max(80),
+  voice: z.string().min(1).max(900),
+  screen: z.string().min(1).max(160),
+  visual: z.string().min(1).max(240),
+});
+
+export const continueBeats = createServerFn({ method: "POST" })
+  .validator((input: unknown) => input)
+  .handler(async ({ data }) => {
+    const row = asRecord(data);
+    const title = typeof row?.title === "string" ? row.title.slice(0, 120) : "";
+    const soFar = typeof row?.soFar === "number" ? row.soFar : 0;
+    const target = typeof row?.target === "number" ? row.target : 650;
+    const last = typeof row?.last === "string" ? row.last.slice(0, 500) : "";
+    const language = row?.language === "en" ? "English" : "Turkish";
+    if (title.length < 2) return { ok: false as const, error: "Başlık yok.", cut: false };
+    const writer = row?.writer === "grok" || row?.writer === "codex" || row?.writer === "claude" || row?.writer === "gemini" ? row.writer : "api";
+    const textModel = typeof row?.textModel === "string" ? row.textModel : "grok-4.5";
+    const sealed = asRecord(row?.sealed);
+    const sealedKey =
+      sealed && typeof sealed.iv === "string" && typeof sealed.ciphertext === "string"
+        ? { iv: sealed.iv, ciphertext: sealed.ciphertext }
+        : undefined;
+    const system = [
+      "Continue a YouTube script. Return one JSON object and nothing else.",
+      `Write audience-facing strings in ${language}.`,
+      `The film still needs spoken words. So far ${soFar} of ${target}.`,
+      "Add the next section only, about 500 to 700 spoken words, ending on a clean beat.",
+      "Schema: {beats:[{time,title,voice,screen,visual}]}. time is m:ss. voice is narration only. No directing inside voice.",
+      "Do not repeat the previous beat.",
+    ].join(" ");
+    const user = `Title: ${title}\nLast beat:\n${last}`;
+    try {
+      const { completeText, completeWithCli, probeClis } = await import("./ai-runtime");
+      let result: { ok: true; text: string } | { ok: false; error: string };
+      if (writer !== "api") {
+        const probe = await probeClis();
+        const item = probe.items.find((cli) => cli.id === writer);
+        if (item?.status !== "bagli") return { ok: false as const, error: `${writer} bağlı değil.`, cut: false };
+        result = await completeWithCli(writer, `${system}\n\n${user}`);
+      } else {
+        result = await completeText({ model: textModel, system, user, sealed: sealedKey, json: true, maxTokens: 4000 });
+        if (!result.ok && /anahtar yok/i.test(result.error)) {
+          const probe = await probeClis();
+          const item = probe.items.find((cli) => cli.status === "bagli");
+          if (!item) return { ok: false as const, error: result.error, cut: false };
+          result = await completeWithCli(item.id, `${system}\n\n${user}`);
+        }
+      }
+      if (!result.ok) return { ok: false as const, error: result.error, cut: true };
+      let raw: unknown;
+      try {
+        raw = extractJson(result.text);
+      } catch {
+        return { ok: false as const, error: "Metin kesildi.", cut: true };
+      }
+      const root = asRecord(raw);
+      const list = Array.isArray(root?.beats) ? root.beats : Array.isArray(raw) ? raw : [];
+      const beats = list.flatMap((item) => {
+        const parsed = ContinueBeat.safeParse(item);
+        return parsed.success ? [parsed.data] : [];
+      });
+      if (!beats.length) return { ok: false as const, error: "Devam boş döndü.", cut: true };
+      return { ok: true as const, beats, cut: false };
+    } catch {
+      return { ok: false as const, error: "Bağlantı koptu.", cut: true };
+    }
+  });
+
+export const startSesleJob = createServerFn({ method: "POST" })
+  .validator((input: unknown) => input)
+  .handler(async ({ data }) => {
+    const row = asRecord(data);
+    const chunks = Array.isArray(row?.chunks) ? row.chunks.filter((item): item is string => typeof item === "string").slice(0, 12) : [];
+    const folder = typeof row?.folder === "string" ? row.folder.replace(/[\\/:*?"<>|]/g, " ").trim().slice(0, 80) : "";
+    if (!folder || chunks.length === 0) return { ok: false as const, error: "Sesle için metin yok." };
+    const { startSesle } = await import("./sesle-run");
+    return startSesle({
+      folder,
+      voice: typeof row?.voice === "string" ? row.voice.slice(0, 40) : "Ultra Epic",
+      speed: typeof row?.speed === "number" ? row.speed : 1,
+      chunks,
+      only: typeof row?.only === "number" ? row.only : undefined,
+    });
+  });
+
+export const pollSesleJob = createServerFn({ method: "POST" })
+  .validator((input: unknown) => input)
+  .handler(async ({ data }) => {
+    const row = asRecord(data);
+    const id = typeof row?.jobId === "string" ? row.jobId : "";
+    const { sesleJob } = await import("./sesle-run");
+    const job = sesleJob(id);
+    if (!job) return { ok: false as const, error: "İş yok." };
+    return { ok: true as const, job };
   });

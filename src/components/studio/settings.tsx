@@ -23,11 +23,22 @@ const TEXT_MODELS = [
 const IMAGE_MODELS = [
   ["grok-imagine-image", "Grok Imagine"],
   ["grok-imagine-image-quality", "Grok Imagine kalite"],
+  ["gemini-2.5-flash-image", "Gemini görsel"],
+  ["imagen-4.0-generate-001", "Imagen 4"],
 ];
 
 const VIDEO_MODELS = [
   ["grok-imagine-video-1.5-lite", "Grok Imagine video, hafif"],
   ["grok-imagine-video-1.5", "Grok Imagine video 1.5"],
+  ["veo-3.1-lite-generate-preview", "Veo 3.1 Lite"],
+];
+
+const WRITERS = [
+  ["api", "API"],
+  ["grok", "grok CLI"],
+  ["codex", "codex CLI"],
+  ["claude", "claude CLI"],
+  ["gemini", "gemini CLI"],
 ];
 
 const STATUS_LABEL = {
@@ -94,7 +105,7 @@ export function Settings() {
   }
 
   return (
-    <main className="mx-auto flex w-full max-w-3xl flex-col gap-8 px-4 py-6 sm:px-6 sm:py-10">
+    <main className="mx-auto flex w-full max-w-3xl flex-col gap-8 px-4 py-6 pb-28 sm:px-6 sm:py-10 sm:pb-10">
       <Link to="/" className="w-fit text-sm text-muted">
         Masaya dön
       </Link>
@@ -127,7 +138,29 @@ export function Settings() {
           options={VIDEO_MODELS}
           onChange={(video) => setModels({ video })}
         />
-        <p className="text-sm text-faint">Görsel ve video Grok Imagine ile üretilir. Metin, seçilen modele gider.</p>
+        <ModelSelect
+          label="Video boyu"
+          value={models.videoSize}
+          options={[
+            ["720p", "720p"],
+            ["1080p", "1080p"],
+          ]}
+          onChange={(videoSize) => setModels({ videoSize: videoSize === "1080p" ? "1080p" : "720p" })}
+        />
+        <ModelSelect
+          label="Metin yolu"
+          value={models.writer}
+          options={WRITERS}
+          onChange={(writer) =>
+            setModels({
+              writer: writer === "grok" || writer === "codex" || writer === "claude" || writer === "gemini" ? writer : "api",
+            })
+          }
+        />
+        <p className="text-sm text-faint">
+          Sahne, xAI, Gemini ya da elle kopyayı kendi seçer. Metin yolu bir CLI ise ve o CLI bağlıysa Grok ile yaz
+          API yerine onu çağırır. Anahtar yoksa bağlı bir CLI'ya geçilir.
+        </p>
       </section>
 
       <section className="flex flex-col gap-4">

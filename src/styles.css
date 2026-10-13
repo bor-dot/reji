@@ -63,8 +63,12 @@
   }
 }
 
-.nums {
-  font-variant-numeric: tabular-nums;
+.scroll-row {
+  scrollbar-width: none;
+}
+
+.scroll-row::-webkit-scrollbar {
+  display: none;
 }
 
 .press {

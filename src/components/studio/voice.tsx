@@ -1,7 +1,10 @@
 import { useServerFn } from "@tanstack/react-start";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Channel } from "@/lib/studio/channels";
-import { speakScript } from "@/lib/studio/generate";
+import { pollSesleJob, speakScript, startSesleJob } from "@/lib/studio/generate";
+import { exportFolderName } from "@/lib/studio/karevo";
+import { narrationChunks, narrationText } from "@/lib/studio/narration";
+import { putSceneAudio } from "@/lib/studio/scene-audio";
 import { useStudio } from "@/lib/studio/store";
 import { notify } from "@/lib/studio/toast";
 import type { Project } from "@/lib/studio/types";
@@ -48,7 +51,7 @@ function scriptOf(project: Project) {
 }
 
 export function VoiceStage({ project, channel }: { project: Project; channel: Channel }) {
-  const { keyFor } = useStudio();
+  const { keyFor, patchPack } = useStudio();
   const speak = useServerFn(speakScript);
   const suggested = voiceForChannel(channel);
   const area = useRef<HTMLTextAreaElement>(null);
@@ -59,6 +62,8 @@ export function VoiceStage({ project, channel }: { project: Project; channel: Ch
   const [speed, setSpeed] = useState(1);
   const [gender, setGender] = useState<"hepsi" | "kadın" | "erkek">("hepsi");
   const [busy, setBusy] = useState(false);
+  const [sceneBusy, setSceneBusy] = useState("");
+  const [mode, setMode] = useState<"sesle" | "xai">("xai");
   const [playing, setPlaying] = useState(false);
   const [time, setTime] = useState(0);
   const [clip, setClip] = useState<Clip | null>(null);
@@ -194,6 +199,47 @@ export function VoiceStage({ project, channel }: { project: Project; channel: Ch
     }
   }
 
+  async function speakScene(index: number) {
+    const beat = project.pack.beats[index];
+    const scene = project.pack.scenes[index];
+    const spoken = beat?.voice.trim() ?? "";
+    if (!scene || spoken.length < 2) {
+      notify("Bu sahnede anlatım yok.");
+      return;
+    }
+    setSceneBusy(scene.id);
+    try {
+      const blob = keyFor("xai");
+      const res = await speak({
+        data: {
+          text: spoken.slice(0, VOICE_LIMIT),
+          voiceId,
+          speed,
+          language: project.brief.language,
+          sealed: blob ? { iv: blob.iv, ciphertext: blob.ciphertext } : undefined,
+        },
+      });
+      if (!res.ok) {
+        notify(res.error);
+        return;
+      }
+      const duration = res.duration || res.words.at(-1)?.end || 0;
+      if (duration <= 0) {
+        notify("Ses süresi gelmedi.");
+        return;
+      }
+      await putSceneAudio(project.id, scene.id, res.audioBase64, duration);
+      patchPack(project.id, {
+        scenes: project.pack.scenes.map((item) => (item.id === scene.id ? { ...item, audioDuration: duration } : item)),
+      });
+      notify(`${String(index + 1).padStart(2, "0")} sahne sesi hazır.`);
+    } catch {
+      notify("Sahne sesi yazılamadı.");
+    } finally {
+      setSceneBusy("");
+    }
+  }
+
   function toggle() {
     const node = audio.current;
     if (!node || !clip) return;
@@ -216,16 +262,25 @@ export function VoiceStage({ project, channel }: { project: Project; channel: Ch
       <div>
         <h2 className="text-2xl">Ses</h2>
         <p className="mt-1 text-sm text-muted">
-          Sesle stüdyosu bu çekimin içinde. {channel.name} için önerilen ses {suggested.name}. Tek istek, en
-          fazla {VOICE_LIMIT.toLocaleString("tr")} karakter.
+          Sesle siteyi kullanır ya da xAI Ses ile tek istek atar. {channel.name} için önerilen ses {suggested.name}.
         </p>
       </div>
+      <div className="flex gap-2">
+        <Chip active={mode === "sesle"} onClick={() => setMode("sesle")}>
+          Sesle
+        </Chip>
+        <Chip active={mode === "xai"} onClick={() => setMode("xai")}>
+          xAI Ses
+        </Chip>
+      </div>
+      {mode === "sesle" ? <SeslePanel project={project} channel={channel} /> : null}
+      <div className={mode === "xai" ? "flex flex-col gap-5" : "hidden"}>
 
       <div className="flex flex-wrap gap-2">
-        <Button variant="line" className="h-10" onClick={() => setText(scriptOf(project))}>
+        <Button variant="line" onClick={() => setText(scriptOf(project))}>
           Senaryodan al
         </Button>
-        <Button variant="line" className="h-10" onClick={() => setVoiceId(suggested.id)}>
+        <Button variant="line" onClick={() => setVoiceId(suggested.id)}>
           {suggested.name}
         </Button>
         {project.pack.beats.map((beat, index) => (
@@ -396,8 +451,147 @@ export function VoiceStage({ project, channel }: { project: Project; channel: Ch
           </ul>
         )}
       </section>
+
+      <section className="flex flex-col gap-3">
+        <h3 className="text-lg">Sahne sesleri</h3>
+        <p className="text-sm text-faint">Karevo her sahne için ayrı MP3 ister. Seçili ses ve hız kullanılır.</p>
+        <ul className="flex flex-col gap-2">
+          {project.pack.scenes.map((scene, index) => (
+            <li key={scene.id} className="flex items-center justify-between gap-3 rounded-xl bg-elevated p-3 ring-1 ring-line">
+              <div className="min-w-0">
+                <p className="text-sm text-fg">
+                  {String(index + 1).padStart(2, "0")} · {scene.title}
+                </p>
+                <p className="nums text-sm text-faint">
+                  {scene.audioDuration ? `${scene.audioDuration.toFixed(1)} sn` : "ses yok"}
+                </p>
+              </div>
+              <Button variant="line" disabled={Boolean(sceneBusy) || busy} onClick={() => void speakScene(index)}>
+                {sceneBusy === scene.id ? "Yazılıyor" : "Ses üret"}
+              </Button>
+            </li>
+          ))}
+        </ul>
+      </section>
+      </div>
     </div>
   );
+}
+
+function sesleName(channel: Channel) {
+  if (channel.id === "bilimcifikri" || channel.kind === "belgesel") return "Ultra Epic";
+  if (channel.kind === "kitap" || /kitap|anatomi/i.test(channel.name)) return "Orion";
+  return voiceForChannel(channel).name;
+}
+
+function SeslePanel({ project, channel }: { project: Project; channel: Channel }) {
+  const { patchPack } = useStudio();
+  const start = useServerFn(startSesleJob);
+  const poll = useServerFn(pollSesleJob);
+  const chunks = narrationChunks(narrationText(project.pack.beats));
+  const [jobId, setJobId] = useState("");
+  const [note, setNote] = useState("");
+  const [rows, setRows] = useState<{ index: number; status: string; detail: string }[]>([]);
+  const [busy, setBusy] = useState(false);
+  const voice = sesleName(channel);
+  const done = rows.filter((row) => row.status === "tamam").length;
+
+  useEffect(() => {
+    if (!jobId || !busy) return;
+    const timer = window.setInterval(() => {
+      void poll({ data: { jobId } }).then(async (res) => {
+        if (!res.ok) return;
+        setNote(res.job.note);
+        setRows(res.job.chunks.map((chunk) => ({ index: chunk.index, status: chunk.status, detail: chunk.detail })));
+        if (res.job.status === "bitti" || res.job.status === "hata") {
+          setBusy(false);
+          const scenes = [...project.pack.scenes];
+          for (const chunk of res.job.chunks) {
+            if (chunk.status !== "tamam" || !chunk.audioBase64) continue;
+            const scene = scenes[chunk.index];
+            if (!scene) continue;
+            const duration = await clipDuration(chunk.audioBase64);
+            await putSceneAudio(project.id, scene.id, chunk.audioBase64, duration || 1);
+            scenes[chunk.index] = { ...scene, audioDuration: duration || 1 };
+          }
+          patchPack(project.id, { scenes });
+          notify(res.job.status === "bitti" ? "Sesle bitti." : res.job.note);
+        }
+      });
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [jobId, busy, patchPack, poll, project.id, project.pack.scenes]);
+
+  async function run(only?: number) {
+    if (!chunks.length) {
+      notify("Anlatım metni yok.");
+      return;
+    }
+    setBusy(true);
+    setNote(only != null ? "Parça yeniden deneniyor." : "Sesle başlıyor.");
+    try {
+      const res = await start({
+        data: { folder: exportFolderName(project.brief.title), voice, speed: 1, chunks, only },
+      });
+      if (!res.ok) {
+        setBusy(false);
+        notify(res.error);
+        return;
+      }
+      setJobId(res.jobId);
+    } catch {
+      setBusy(false);
+      notify("Sesle başlatılamadı.");
+    }
+  }
+
+  return (
+    <section className="flex flex-col gap-3 rounded-xl bg-elevated p-4 ring-1 ring-line">
+      <h3 className="text-lg">Sesle</h3>
+      <p className="text-sm text-muted">
+        {voice} · 1.00× · {chunks.length} parça, her biri en fazla 1.800 karakter. İlk girişte tarayıcı açılır, şifre
+        saklanmaz.
+      </p>
+      <div className="h-2 overflow-hidden rounded-full bg-subtle">
+        <div className="h-full bg-paper" style={{ width: `${chunks.length ? Math.round((done / chunks.length) * 100) : 0}%` }} />
+      </div>
+      <p className="text-sm text-faint">{note || `${done}/${chunks.length || 0}`}</p>
+      <ul className="flex flex-col gap-2">
+        {chunks.map((text, index) => {
+          const row = rows.find((item) => item.index === index);
+          return (
+            <li key={index} className="flex items-center justify-between gap-3">
+              <span className="min-w-0 text-sm text-fg">
+                {String(index + 1).padStart(2, "0")} · {row?.status ?? "bekliyor"} · {text.slice(0, 48)}
+              </span>
+              {row?.status === "hata" ? (
+                <Button variant="line" disabled={busy} onClick={() => void run(index)}>
+                  Tekrar dene
+                </Button>
+              ) : null}
+            </li>
+          );
+        })}
+      </ul>
+      <Button disabled={busy || chunks.length === 0} onClick={() => void run()}>
+        {busy ? "Sesle çalışıyor" : "Sesle ile üret"}
+      </Button>
+    </section>
+  );
+}
+
+function clipDuration(base64: string) {
+  const bytes = Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
+  const url = URL.createObjectURL(new Blob([bytes], { type: "audio/mpeg" }));
+  return new Promise<number>((resolve) => {
+    const audio = new Audio(url);
+    const finish = (value: number) => {
+      URL.revokeObjectURL(url);
+      resolve(value);
+    };
+    audio.onloadedmetadata = () => finish(Number.isFinite(audio.duration) ? audio.duration : 0);
+    audio.onerror = () => finish(0);
+  });
 }
 
 function VoiceCard({ voice, selected, onSelect }: { voice: Voice; selected: boolean; onSelect: () => void }) {

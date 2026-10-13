@@ -165,16 +165,20 @@ test("cli: relative paths follow the script's root, not the caller's cwd", () =>
 });
 
 test("every hand-over the og skill prints is one this script accepts", () => {
-  // The card and banner recipes live in the skill's references/, not SKILL.md.
+  // references/ is optional. A workspace without that folder must still pass.
   const skillDir = join(TEMPLATE_ROOT, ".grok/skills/og");
-  const docs = [
-    join(skillDir, "SKILL.md"),
-    ...readdirSync(join(skillDir, "references")).map((f) => join(skillDir, "references", f)),
-  ];
+  const skill = join(skillDir, "SKILL.md");
+  const refsDir = join(skillDir, "references");
+  const docs = existsSync(skill) ? [skill] : [];
+  if (existsSync(refsDir)) {
+    docs.push(...readdirSync(refsDir).map((name) => join(refsDir, name)));
+  }
   const invocations = docs.flatMap(
     (path) => readFileSync(path, "utf8").match(/node scripts\/write-atomic\.mjs[^\n`]*/g) ?? [],
   );
-  assert.ok(invocations.length >= 3, "og.jpg, x-banner.jpg and site.json each hand over");
+  if (existsSync(refsDir)) {
+    assert.ok(invocations.length >= 3, "og.jpg, x-banner.jpg and site.json each hand over");
+  }
   for (const line of invocations) {
     const argv = line.replace("node scripts/write-atomic.mjs", "").trim().split(/\s+/);
     const args = parseWriteAtomicArgs(argv);

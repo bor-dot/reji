@@ -617,6 +617,8 @@ export function scenesFor(b: Brief, channel: Channel, beats: Beat[], previous?: 
       simulation: reconstruction,
       imageUrl: prev?.imageUrl,
       videoUrl: prev?.videoUrl,
+      audioDuration: prev?.audioDuration,
+      route: prev?.route,
     };
   });
 }

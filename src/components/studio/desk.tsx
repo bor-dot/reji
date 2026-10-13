@@ -1,11 +1,49 @@
 import { Link, useNavigate } from "@tanstack/react-router";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { needsSources, NEUTRAL_COVER, type Channel, type ChannelKind } from "@/lib/studio/channels";
 import { SEEDS } from "@/lib/studio/engine";
 import { DEFAULT_MODELS, useStudio, type KeyBlob, type ModelPrefs } from "@/lib/studio/store";
 import { notify } from "@/lib/studio/toast";
 import { FORMATS, formatLabel, type Brief, type FormatId, type Lang } from "@/lib/studio/types";
-import { Button, Chip, Field, fieldClass } from "./bits";
+import { Button, Chip, Field, ScrollRow, fieldClass } from "./bits";
+
+function clampMinutes(value: number): number {
+  if (!Number.isFinite(value)) return 1;
+  return Math.min(30, Math.max(1, Math.trunc(value)));
+}
+
+function MinutesField({ value, onCommit }: { value: number; onCommit: (minutes: number) => void }) {
+  const [text, setText] = useState(() => String(value));
+  const editing = useRef(false);
+
+  useEffect(() => {
+    if (!editing.current) setText(String(value));
+  }, [value]);
+
+  return (
+    <input
+      className={`${fieldClass} nums h-11`}
+      type="text"
+      inputMode="numeric"
+      autoComplete="off"
+      value={text}
+      onFocus={() => {
+        editing.current = true;
+      }}
+      onChange={(e) => {
+        const next = e.target.value.replace(/\D/g, "");
+        setText(next);
+        if (next !== "") onCommit(Number(next));
+      }}
+      onBlur={() => {
+        editing.current = false;
+        const next = clampMinutes(Number(text));
+        setText(String(next));
+        onCommit(next);
+      }}
+    />
+  );
+}
 
 function blankFrom(channel: Channel): Brief {
   return {
@@ -124,7 +162,7 @@ export function Desk() {
   }
 
   return (
-    <main className="mx-auto flex w-full max-w-6xl flex-col gap-8 px-4 py-6 sm:px-6 sm:py-10">
+    <main className="mx-auto flex w-full max-w-6xl flex-col gap-8 px-4 py-6 pb-28 sm:px-6 sm:py-10 sm:pb-10">
       <header className="flex flex-col gap-6 sm:flex-row sm:items-end sm:justify-between">
         <div className="max-w-xl">
           <p className="text-sm font-medium text-faint">Dört kanallı yayın masası</p>
@@ -136,28 +174,47 @@ export function Desk() {
         <div className="flex flex-wrap gap-2">
           <Link
             to="/ayarlar"
-            className="press inline-flex h-11 items-center rounded-lg px-4 text-sm font-medium text-fg ring-1 ring-line"
+            className="press inline-flex h-11 min-h-11 items-center rounded-lg px-4 text-sm font-medium text-fg ring-1 ring-line"
           >
             Ayarlar
           </Link>
           <Button
+            variant="line"
             onClick={() => {
-              setDraft(blankFrom(active));
-              setOpen((value) => !value);
+              setEditing(false);
+              setCreating((value) => {
+                const next = !value;
+                if (next) {
+                  requestAnimationFrame(() => {
+                    document.getElementById("yeni-kanal")?.scrollIntoView({ block: "start" });
+                  });
+                }
+                return next;
+              });
             }}
           >
-            {open ? "Kapat" : "Yeni çekim"}
+            {creating ? "Vazgeç" : "Yeni kanal"}
           </Button>
+          <span className="hidden sm:inline-flex">
+            <Button
+              onClick={() => {
+                setDraft(blankFrom(active));
+                setOpen((value) => !value);
+              }}
+            >
+              {open ? "Kapat" : "Yeni çekim"}
+            </Button>
+          </span>
         </div>
       </header>
 
-      <div className="flex gap-2 overflow-x-auto" aria-label="Kanallar">
+      <ScrollRow label="Kanallar">
         {channels.map((channel) => (
           <Chip key={channel.id} active={channel.id === active.id} onClick={() => setActive(channel.id)}>
             {channel.name}
           </Chip>
         ))}
-      </div>
+      </ScrollRow>
 
       <section className="flex flex-col gap-3 rounded-2xl bg-elevated p-4 ring-1 ring-line">
         <div className="flex flex-wrap items-start justify-between gap-3">
@@ -168,27 +225,17 @@ export function Desk() {
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
-            <Button variant="line" className="h-10" onClick={() => setEditing((value) => !value)}>
+            <Button variant="line" onClick={() => setEditing((value) => !value)}>
               {editing ? "Kapat" : "Kanalı düzenle"}
-            </Button>
-            <Button
-              variant="line"
-              className="h-10"
-              onClick={() => {
-                setEditing(false);
-                setCreating((value) => !value);
-              }}
-            >
-              {creating ? "Vazgeç" : "Yeni kanal"}
             </Button>
           </div>
         </div>
         <p className="text-sm text-faint">{active.coverStyle}</p>
         <div className="flex flex-wrap gap-2">
-          <Button variant="quiet" className="h-10 px-0" onClick={exportVault}>
+          <Button variant="quiet" className="h-11 px-3" onClick={exportVault}>
             Dışa aktar
           </Button>
-          <Button variant="quiet" className="h-10 px-0" onClick={() => fileRef.current?.click()}>
+          <Button variant="quiet" className="h-11 px-3" onClick={() => fileRef.current?.click()}>
             İçe aktar
           </Button>
           <input
@@ -202,7 +249,7 @@ export function Desk() {
               event.target.value = "";
             }}
           />
-          <Button variant="quiet" className="h-10 px-0" onClick={restoreChannels}>
+          <Button variant="quiet" className="h-11 px-3" onClick={restoreChannels}>
             Eksik varsayılanları getir
           </Button>
         </div>
@@ -222,13 +269,15 @@ export function Desk() {
           />
         ) : null}
         {creating ? (
-          <NewChannel
-            onCreate={(channel) => {
-              addChannel(channel);
-              setCreating(false);
-              notify("Kanal eklendi.");
-            }}
-          />
+          <div id="yeni-kanal">
+            <NewChannel
+              onCreate={(channel) => {
+                addChannel(channel);
+                setCreating(false);
+                notify("Kanal eklendi.");
+              }}
+            />
+          </div>
         ) : null}
       </section>
 
@@ -239,6 +288,7 @@ export function Desk() {
 
       {open ? (
         <form
+          id="yeni-cekim"
           className="rise grid gap-4 rounded-2xl bg-elevated p-4 ring-1 ring-line sm:p-5"
           onSubmit={(e) => {
             e.preventDefault();
@@ -310,14 +360,7 @@ export function Desk() {
               {draft.format === "shorts" ? (
                 <p className="flex h-11 items-center text-fg">45 saniye</p>
               ) : (
-                <input
-                  className={`${fieldClass} nums h-11`}
-                  type="number"
-                  min={1}
-                  max={30}
-                  value={draft.minutes}
-                  onChange={(e) => set("minutes", Number(e.target.value) || 1)}
-                />
+                <MinutesField value={draft.minutes} onCommit={(minutes) => set("minutes", minutes)} />
               )}
             </Field>
             <div className="flex flex-col gap-2">
@@ -383,6 +426,31 @@ export function Desk() {
           ))}
         </ul>
       )}
+      <button
+        type="button"
+        className="press fixed right-4 bottom-5 z-40 flex size-14 items-center justify-center rounded-full bg-paper text-ink sm:hidden"
+        aria-label={open ? "Formu kapat" : "Yeni çekim"}
+        onClick={() => {
+          setDraft(blankFrom(active));
+          setOpen((value) => {
+            const next = !value;
+            if (next) {
+              requestAnimationFrame(() => {
+                document.getElementById("yeni-cekim")?.scrollIntoView({ block: "start" });
+              });
+            }
+            return next;
+          });
+        }}
+      >
+        <svg viewBox="0 0 24 24" className="size-7" aria-hidden="true" fill="none">
+          {open ? (
+            <path d="M6 6l12 12M18 6 6 18" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+          ) : (
+            <path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+          )}
+        </svg>
+      </button>
     </main>
   );
 }
@@ -476,14 +544,7 @@ function ChannelFields({
       </Field>
       <div className="grid gap-4 sm:grid-cols-2">
         <Field label="Video süresi (dk)">
-          <input
-            className={`${fieldClass} nums h-11`}
-            type="number"
-            min={1}
-            max={30}
-            value={draft.minutes}
-            onChange={(e) => set({ minutes: Number(e.target.value) || 1 })}
-          />
+          <MinutesField value={draft.minutes} onCommit={(minutes) => set({ minutes })} />
         </Field>
         <div className="flex flex-col gap-2">
           <span className="text-sm font-medium text-muted">Biçim</span>

@@ -68,6 +68,8 @@ export type Scene = {
   simulation: boolean;
   imageUrl?: string;
   videoUrl?: string;
+  audioDuration?: number;
+  route?: "xai" | "gemini" | "elle";
 };
 
 export type Pack = {
