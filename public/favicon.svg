@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="REJİ">
+  <rect width="32" height="32" rx="7" fill="#0c0c0d"/>
+  <rect x="5.5" y="12" width="21" height="14" rx="1.8" fill="#f3f2ef"/>
+  <path fill="#8b97a6" d="M5.5 12.6h21L23.2 6.2H8.4z"/>
+  <path d="M11 7.15 13.7 12.35" stroke="#0c0c0d" stroke-width="2.1" stroke-linecap="square"/>
+  <path d="M17.15 6.85 19.85 12.05" stroke="#0c0c0d" stroke-width="2.1" stroke-linecap="square"/>
+</svg>
