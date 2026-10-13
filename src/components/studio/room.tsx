@@ -8,12 +8,14 @@ import { useStudio } from "@/lib/studio/store";
 import { notify } from "@/lib/studio/toast";
 import { formatLabel, type Beat, type Hook, type Pack, type Project, type Scene, type Shot } from "@/lib/studio/types";
 import { Button, CopyButton, fieldClass } from "./bits";
+import { VoiceStage } from "./voice";
 
 const STAGES = [
   ["brief", "Brief"],
   ["baslik", "Başlık"],
   ["kanca", "Kanca"],
   ["senaryo", "Senaryo"],
+  ["ses", "Ses"],
   ["cekim", "Çekim"],
   ["kapak", "Kapak"],
   ["gorsel", "Görsel"],
@@ -200,6 +202,7 @@ export function Room({ project }: { project: Project }) {
           {stage === "senaryo" ? (
             <ScriptStage pack={project.pack} onPatch={(patch) => patchPack(project.id, patch)} />
           ) : null}
+          {stage === "ses" && channel ? <VoiceStage project={project} channel={channel} /> : null}
           {stage === "cekim" ? (
             <ShotsStage pack={project.pack} onPatch={(patch) => patchPack(project.id, patch)} />
           ) : null}

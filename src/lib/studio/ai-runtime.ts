@@ -211,6 +211,111 @@ export async function startVideo(prompt: string, model: string, sealed?: { iv: s
   }
 }
 
+const SPEAK_VOICES: Record<string, string> = {
+  merak: "helios",
+  "ultra-epic": "atlas",
+  destan: "lumen",
+  eve: "eve",
+  ara: "ara",
+  luna: "luna",
+  carina: "carina",
+  altair: "altair",
+  celeste: "celeste",
+  orion: "orion",
+  leo: "leo",
+  helix: "helix",
+  rex: "rex",
+  lux: "lux",
+  sirius: "sirius",
+};
+
+export type SpokenWord = { text: string; start: number; end: number };
+
+function wordsFromGraph(chars: string[], times: number[][]) {
+  const words: SpokenWord[] = [];
+  let buf = "";
+  let start = 0;
+  let end = 0;
+  const flush = () => {
+    const text = buf.trim();
+    buf = "";
+    if (!text || /^[[<]/.test(text)) return;
+    words.push({ text, start, end });
+  };
+  for (let i = 0; i < chars.length; i++) {
+    const ch = chars[i] ?? "";
+    const span = times[i] ?? [end, end];
+    if (/\s/.test(ch)) {
+      flush();
+      continue;
+    }
+    if (!buf) start = Number(span[0]) || 0;
+    buf += ch;
+    end = Number(span[1]) || start;
+  }
+  flush();
+  return words;
+}
+
+export async function speakText(input: {
+  text: string;
+  voiceId: string;
+  speed: number;
+  language: string;
+  sealed?: { iv: string; ciphertext: string };
+}) {
+  const key = resolveKey("xai", input.sealed);
+  if (!key) return { ok: false as const, error: "Ses için xAI anahtarı yok." };
+  const text = input.text.trim().slice(0, 3000);
+  if (text.length < 2) return { ok: false as const, error: "Önce bir metin yaz." };
+  const voice = SPEAK_VOICES[input.voiceId] ?? "eve";
+  const speed = Math.min(1.5, Math.max(0.7, Number(input.speed) || 1));
+  const language = input.language === "en" ? "en" : "tr";
+  try {
+    const res = await fetch("https://api.x.ai/v1/tts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+      body: JSON.stringify({
+        text,
+        voice_id: voice,
+        language,
+        speed,
+        with_timestamps: true,
+        output_format: { codec: "mp3", sample_rate: 24000, bit_rate: 96000 },
+      }),
+    });
+    const type = res.headers.get("content-type") ?? "";
+    if (!res.ok) return { ok: false as const, error: clipError(res.status, await res.text()) };
+    if (type.includes("audio")) {
+      const audioBase64 = Buffer.from(await res.arrayBuffer()).toString("base64");
+      return {
+        ok: true as const,
+        audioBase64,
+        contentType: type.split(";")[0] || "audio/mpeg",
+        duration: 0,
+        words: [] as SpokenWord[],
+      };
+    }
+    const body = (await res.json()) as {
+      audio?: string;
+      content_type?: string;
+      duration?: number;
+      audio_timestamps?: { graph_chars?: string[]; graph_times?: number[][] };
+    };
+    if (!body.audio) return { ok: false as const, error: "Ses dosyası gelmedi." };
+    const words = wordsFromGraph(body.audio_timestamps?.graph_chars ?? [], body.audio_timestamps?.graph_times ?? []);
+    return {
+      ok: true as const,
+      audioBase64: body.audio,
+      contentType: body.content_type || "audio/mpeg",
+      duration: Number(body.duration) || 0,
+      words,
+    };
+  } catch {
+    return { ok: false as const, error: "Ses isteği koptu." };
+  }
+}
+
 export async function pollVideo(requestId: string, sealed?: { iv: string; ciphertext: string }) {
   const key = resolveKey("xai", sealed);
   if (!key) return { ok: false as const, error: "Video için xAI anahtarı yok." };

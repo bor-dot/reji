@@ -130,8 +130,7 @@ export function Desk() {
           <p className="text-sm font-medium text-faint">Dört kanallı yayın masası</p>
           <h1 className="mt-1 text-4xl text-fg sm:text-5xl">REJİ</h1>
           <p className="mt-3 text-base text-muted">
-            Kanal profili brief’i, kapağı ve görsel promptu belirler. Masa kalıbı hemen kurulur, Grok aynı
-            brief’i baştan yazar.
+            Kanal profili brief’i, kapağı ve görseli belirler. Ses sekmesi metni Sesle sesleriyle okur.
           </p>
         </div>
         <div className="flex flex-wrap gap-2">

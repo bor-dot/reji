@@ -311,3 +311,22 @@ export const probeLocalClis = createServerFn({ method: "GET" }).handler(async ()
   const { probeClis } = await import("./ai-runtime");
   return probeClis();
 });
+
+export const speakScript = createServerFn({ method: "POST" })
+  .validator((input: unknown) => input)
+  .handler(async ({ data }) => {
+    const row = asRecord(data);
+    const text = typeof row?.text === "string" ? row.text.slice(0, 3000) : "";
+    const voiceId = typeof row?.voiceId === "string" ? row.voiceId : "eve";
+    const speed = typeof row?.speed === "number" ? row.speed : 1;
+    const language = row?.language === "en" ? "en" : "tr";
+    const sealed = SealedSchema.safeParse(row?.sealed);
+    const { speakText } = await import("./ai-runtime");
+    return speakText({
+      text,
+      voiceId,
+      speed,
+      language,
+      sealed: sealed.success ? sealed.data : undefined,
+    });
+  });
