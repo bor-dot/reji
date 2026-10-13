@@ -15,6 +15,7 @@ export type Channel = {
   name: string;
   topic: string;
   audience: string;
+  description?: string;
   palette: string;
   coverStyle: string;
   tone: string;
@@ -34,6 +35,7 @@ export const DEFAULT_CHANNELS: Channel[] = [
     name: "bilimcifikri",
     topic: "Bilim ve belgesel",
     audience: "meraklı yetişkin",
+    description: "Bilim, uzay ve biyoloji. Meraklı yetişkin; cevabı herkesin bilmediği sorular.",
     palette: "teal ve turuncu, siyah zemin",
     coverStyle:
       "Solda kırmızı panel, üst yarıda en fazla beş kelime, kalın ve konturlu beyaz yazı. Sağda tek parlak sahne. Siyah tema. İki saniyede okunur. Başlığı tekrarlama.",
@@ -59,6 +61,7 @@ export const DEFAULT_CHANNELS: Channel[] = [
     name: "mitocolik",
     topic: "Mitoloji",
     audience: "mitoloji meraklısı",
+    description: "Mitoloji ve tarih. Destanı merak eden yetişkin.",
     palette: "sıcak vintage, toprak ve amber",
     coverStyle:
       "Sıcak vintage zemin. Üst yarıda en fazla beş kelime, kalın konturlu yazı. Tek figür. İki saniyede okunur. Başlığı tekrarlama.",
@@ -84,6 +87,7 @@ export const DEFAULT_CHANNELS: Channel[] = [
     name: "Bir Kitabın Anatomisi",
     topic: "Kitap incelemesi",
     audience: "kitap okuru",
+    description: "Kitap ve fikir. Bir kitabın savını merak eden okur.",
     palette: "soluk kâğıt, yumuşak mürekkep",
     coverStyle:
       "Soluk kâğıt zemin. Üst yarıda en fazla beş kelime, kalın konturlu yazı. Tek kitap veya tek okur. İki saniyede okunur. Başlığı tekrarlama.",
@@ -109,6 +113,7 @@ export const DEFAULT_CHANNELS: Channel[] = [
     name: "Papi Pupa",
     topic: "Çocuk şarkılı klip",
     audience: "3–6 yaş ve ebeveyn",
+    description: "Çocuklara uygun eğlenceli öğretici. Korku yok, 3–6 yaş ve ebeveyn.",
     palette: "minimal pastel",
     coverStyle:
       "Minimal pastel. Üst yarıda en fazla beş kelime, kalın konturlu yazı. Tek karakter, korku yok. İki saniyede okunur. Başlığı tekrarlama.",

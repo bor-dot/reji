@@ -1,7 +1,10 @@
 import { Link, useNavigate } from "@tanstack/react-router";
+import { useServerFn } from "@tanstack/react-start";
 import { useEffect, useRef, useState } from "react";
 import { needsSources, NEUTRAL_COVER, type Channel, type ChannelKind } from "@/lib/studio/channels";
 import { SEEDS } from "@/lib/studio/engine";
+import { suggestIdeas } from "@/lib/studio/produce";
+import type { Idea } from "@/lib/studio/prompts";
 import { DEFAULT_MODELS, useStudio, type KeyBlob, type ModelPrefs } from "@/lib/studio/store";
 import { notify } from "@/lib/studio/toast";
 import { FORMATS, formatLabel, type Brief, type FormatId, type Lang } from "@/lib/studio/types";
@@ -75,19 +78,75 @@ export function Desk() {
     keys,
     snapshot,
     replaceVault,
+    keyFor,
   } = useStudio();
+  const suggest = useServerFn(suggestIdeas);
   const navigate = useNavigate();
   const fileRef = useRef<HTMLInputElement>(null);
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(false);
   const [creating, setCreating] = useState(false);
   const [draft, setDraft] = useState<Brief>(blankFrom(active));
+  const [ideas, setIdeas] = useState<Idea[]>([]);
+  const [ideaBusy, setIdeaBusy] = useState(false);
   const [error, setError] = useState("");
   const visible = projects.filter((project) => project.channelId === active.id);
   const readyCount = visible.filter((p) => p.pack.checks.every((c) => c.done)).length;
 
   function set<K extends keyof Brief>(key: K, value: Brief[K]) {
     setDraft((prev) => ({ ...prev, [key]: value }));
+  }
+
+  useEffect(() => {
+    setIdeas([]);
+  }, [active.id]);
+
+  async function loadIdeas() {
+    setIdeaBusy(true);
+    setError("");
+    try {
+      const recent = projects
+        .filter((project) => project.channelId === active.id)
+        .sort((a, b) => b.updatedAt - a.updatedAt)
+        .map((project) => project.brief.title.trim())
+        .filter((title, index, all) => title.length > 1 && all.indexOf(title) === index)
+        .slice(0, 20);
+      const saved = keyFor("xai");
+      const res = await suggest({
+        data: {
+          kanal: active.name,
+          aciklama: active.description?.trim() || `${active.topic}. ${active.audience}`,
+          stil: active.tone,
+          konu: active.topic,
+          kitle: active.audience,
+          konular: recent.join("\n"),
+          model: models.text,
+          sealed: saved ? { iv: saved.iv, ciphertext: saved.ciphertext } : undefined,
+        },
+      });
+      if (!res.ok) throw new Error(res.error);
+      setIdeas(res.ideas);
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : "Fikir gelmedi.";
+      setError(message);
+      notify(message);
+    } finally {
+      setIdeaBusy(false);
+    }
+  }
+
+  function takeIdea(idea: Idea) {
+    setDraft((prev) => ({
+      ...prev,
+      title: idea.baslik_onerisi,
+      promise: idea.seri_olur_mu ? `${idea.konu} Seri olabilir.` : idea.konu,
+      audience: active.audience,
+      tone: active.tone,
+      format: active.format,
+      minutes: active.minutes,
+      sources: needsSources(active) ? idea.kaynak_arama : prev.sources,
+    }));
+    setError("");
   }
 
   function submit() {
@@ -295,6 +354,32 @@ export function Desk() {
             submit();
           }}
         >
+          <div className="flex flex-wrap items-center gap-2">
+            <Button type="button" variant="line" disabled={ideaBusy} onClick={() => void loadIdeas()}>
+              {ideaBusy ? "Fikir aranıyor…" : ideas.length ? "Yenile" : "Fikir öner"}
+            </Button>
+            <span className="text-sm text-faint">{active.name} için. Son çekimler tekrar edilmez.</span>
+          </div>
+          {ideas.length ? (
+            <ul className="grid gap-2">
+              {ideas.map((idea) => (
+                <li key={`${idea.baslik_onerisi}-${idea.konu}`}>
+                  <button
+                    type="button"
+                    className="press w-full rounded-xl bg-subtle px-3 py-3 text-left ring-1 ring-line"
+                    onClick={() => takeIdea(idea)}
+                  >
+                    <span className="block text-base text-fg">{idea.baslik_onerisi}</span>
+                    <span className="mt-1 block text-sm text-muted">{idea.konu}</span>
+                    <span className="mt-1 block text-sm text-faint">
+                      {idea.neden_tutar}
+                      {idea.seri_olur_mu ? " · Seri olur" : ""}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : null}
           <div className="flex flex-wrap gap-2">
             {SEEDS.map((seed) => (
               <Chip
@@ -507,6 +592,7 @@ function ChannelFields({
     name: string;
     topic: string;
     audience: string;
+    description: string;
     palette: string;
     coverStyle: string;
     tone: string;
@@ -531,6 +617,15 @@ function ChannelFields({
           <input className={`${fieldClass} h-11`} value={draft.tone} maxLength={40} onChange={(e) => set({ tone: e.target.value })} />
         </Field>
       </div>
+      <Field label="Kanal açıklaması / kitle" hint="Fikir önerisi bu metni kullanır. Alanın dışına çıkmasın.">
+        <textarea
+          className={`${fieldClass} min-h-20 py-3`}
+          value={draft.description}
+          maxLength={400}
+          onChange={(e) => set({ description: e.target.value })}
+          placeholder="Bilim, uzay, biyoloji. Meraklı yetişkin."
+        />
+      </Field>
       <Field label="Renk paleti">
         <input className={`${fieldClass} h-11`} value={draft.palette} maxLength={80} onChange={(e) => set({ palette: e.target.value })} />
       </Field>
@@ -576,6 +671,7 @@ function ChannelForm({
     name: initial.name,
     topic: initial.topic,
     audience: initial.audience,
+    description: initial.description ?? "",
     palette: initial.palette,
     coverStyle: initial.coverStyle,
     tone: initial.tone,
@@ -593,6 +689,7 @@ function ChannelForm({
       name: draft.name.trim(),
       topic: draft.topic.trim() || initial.topic,
       audience: draft.audience.trim() || initial.audience,
+      description: draft.description.trim(),
       palette: draft.palette.trim() || initial.palette,
       coverStyle: draft.coverStyle.trim() || initial.coverStyle,
       tone: draft.tone.trim() || initial.tone,
@@ -651,6 +748,7 @@ function NewChannel({ onCreate }: { onCreate: (channel: Channel) => void }) {
     name: "",
     topic: "",
     audience: "",
+    description: "",
     palette: "",
     coverStyle: "Üst yarıda en fazla beş kelime, kalın konturlu yazı, tek karakter. Başlığı tekrarlama.",
     tone: "",
@@ -670,6 +768,7 @@ function NewChannel({ onCreate }: { onCreate: (channel: Channel) => void }) {
       name: draft.name.trim(),
       topic: draft.topic.trim(),
       audience: draft.audience.trim() || "genel izleyici",
+      description: draft.description.trim(),
       palette: draft.palette.trim() || "nötr",
       coverStyle: draft.coverStyle.trim(),
       tone: draft.tone.trim() || "sakin",

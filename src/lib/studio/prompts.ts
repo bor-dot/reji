@@ -7,7 +7,8 @@ export type StepName =
   | "gorsel"
   | "video"
   | "kapak"
-  | "kontrol";
+  | "kontrol"
+  | "fikir";
 
 const COMMON =
   "Sen {kanal} YouTube kanalının yapımcısısın. Tür: {konu_türü}, kitle: {kitle}, ton: {ton}, stil: {stil}. Türkçe yaz. Sadece istenen JSON'u ver.";
@@ -47,11 +48,20 @@ Kurallar:
 JSON: {"konu_ozeti":"bu sahnede ne gösteriliyor (Türkçe, 1 cümle)","prompt":"..."}`,
   kapak: `Başlık {baslik}. Kapak yazısı en fazla 5 kelime, başlığı tekrar etmesin, tek başına merak uyandırsın; tek ana karakter/nesne; stil {kapak_stili}. Yazı alanı boş görsel promptu (İngilizce). {"kapak_yazisi":"","gorsel_prompt":"","alternatifler":[]}`,
   kontrol: `Başlık en fazla 60 karakter mi, kapak yazısı en fazla 5 kelime ve başlığı tekrar etmiyor mu, kanca ilk 15 sn'de sözü veriyor mu, süre hedefe uyuyor mu, iddiaların kaynağı var mı, sahneler anlatıma uyuyor mu? 0–100 puan, en önemli 3 düzeltme. Başlık: {baslik}. Kanca: {kanca}. Süre: {dakika} dk. Kaynaklar: {kaynaklar}. Parçalar: {parcalar}. {"puan":0,"sorunlar":[],"duzeltmeler":[]}`,
+  fikir: `Kanal: {kanal_adi}. Tür ve kitle: {kanal_aciklama}. Ton: {stil}.
+Son çekilen konular (tekrar etme): {son_konular}.
+Bu kanala uygun 5 YouTube video fikri üret. Kurallar:
+- Yüksek merak + düşük netlik: insanların merak ettiği ama net cevabını bilmediği konular.
+- Güncel/trend olanı öne al (son haftalardaki bilim, kitap, tarih vb. kanalın alanına göre).
+- Her fikir tek cümlede soru veya şaşırtıcı iddia olarak anlaşılır olsun.
+- Kanalın alanı dışına çıkma (bilimcifikri=bilim/uzay/biyoloji; mitocolik=mitoloji/tarih; Bir Kitabın Anatomisi=kitap/fikir; Papi Pupa=çocuklara uygun eğlenceli öğretici).
+- Aynı konudan 3-4 videoluk seri çıkabilecekse belirt.
+JSON: [{"baslik_onerisi":"","konu":"","neden_tutar":"1 cümle","kaynak_arama":"doğrulama için anahtar kelime","seri_olur_mu":true}]`,
 };
 
 export function fillPrompt(template: string, vars: Record<string, string>) {
   return template.replace(
-    /\{(kanal|konu_türü|kitle|ton|stil|konu|vaat|baslik|kanca|kaynaklar|dakika|bolum_sayisi|senaryo|parcalar|anlatim|gorsel_prompt|ses|hız|kapak_stili|oran|onceki)\}/g,
+    /\{(kanal|konu_türü|kitle|ton|stil|konu|vaat|baslik|kanca|kaynaklar|dakika|bolum_sayisi|senaryo|parcalar|anlatim|gorsel_prompt|ses|hız|kapak_stili|oran|onceki|kanal_adi|kanal_aciklama|son_konular)\}/g,
     (token, key: string) => (token ? (vars[key] ?? "") : ""),
   );
 }
@@ -168,7 +178,56 @@ export type StepResult = {
   puan?: number;
   sorunlar?: string[];
   duzeltmeler?: string[];
+  ideas?: Idea[];
 };
+
+export type Idea = {
+  baslik_onerisi: string;
+  konu: string;
+  neden_tutar: string;
+  kaynak_arama: string;
+  seri_olur_mu: boolean;
+};
+
+export function readModelAny(text: string): unknown {
+  const object = readModelJson(text);
+  const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(text);
+  const source = fenced?.[1] ?? text;
+  const start = source.indexOf("[");
+  const end = source.lastIndexOf("]");
+  if (start >= 0 && end > start) {
+    try {
+      const list = JSON.parse(source.slice(start, end + 1)) as unknown;
+      if (Array.isArray(list)) return list;
+    } catch {
+      /* nesne duruyor */
+    }
+  }
+  return object;
+}
+
+export function acceptIdeas(raw: unknown): Idea[] | null {
+  const row = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : null;
+  const list = Array.isArray(raw) ? raw : Array.isArray(row?.fikirler) ? row.fikirler : Array.isArray(row?.ideas) ? row.ideas : [];
+  const ideas = list
+    .map((item) => {
+      const beat = item && typeof item === "object" ? (item as Record<string, unknown>) : null;
+      if (!beat) return null;
+      const konu = clip(beat.konu, 280);
+      const baslik = clip(beat.baslik_onerisi, 80) || konu.slice(0, 80);
+      if (konu.length < 8 || baslik.length < 4) return null;
+      return {
+        baslik_onerisi: baslik,
+        konu,
+        neden_tutar: clip(beat.neden_tutar, 180) || "Merakı yüksek, cevap net değil.",
+        kaynak_arama: clip(beat.kaynak_arama, 120) || baslik,
+        seri_olur_mu: beat.seri_olur_mu === true,
+      };
+    })
+    .filter((item): item is Idea => Boolean(item))
+    .slice(0, 5);
+  return ideas.length >= 3 ? ideas : null;
+}
 
 export function acceptStep(
   step: StepName,
@@ -255,6 +314,10 @@ export function acceptStep(
     const gorsel = clip(raw.gorsel_prompt, 700);
     if (!words.length || gorsel.split(/\s+/).length < 4) return null;
     return { kapak_yazisi: words.join(" "), gorsel_prompt: gorsel, alternatifler: strings(raw.alternatifler, 80, 4) };
+  }
+  if (step === "fikir") {
+    const ideas = acceptIdeas(raw);
+    return ideas ? { ideas } : null;
   }
   const puan = Math.min(100, Math.max(0, Math.round(Number(raw.puan) || 0)));
   return {

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServerFn } from "@tanstack/react-start";
 import { openExportFolder, writeShootFiles, type ShootFile } from "./karevo-write";
-import { acceptStep, mediaPromptProblem, promptFor, readModelJson, sectionCount, type StepName } from "./prompts";
+import { acceptIdeas, acceptStep, mediaPromptProblem, promptFor, readModelAny, readModelJson, sectionCount, type StepName } from "./prompts";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -244,4 +244,52 @@ export const produceStep = createServerFn({ method: "POST" })
     }
     if (!accepted) return { ok: false as const, error: "Bu adımın JSON'u okunamadı. Yine dene." };
     return { ok: true as const, label: route.label, step, ...accepted };
+  });
+
+export const suggestIdeas = createServerFn({ method: "POST" })
+  .validator((input: unknown) => input)
+  .handler(async ({ data }) => {
+    const row = asRecord(data);
+    const name = typeof row?.kanal === "string" ? row.kanal.slice(0, 80) : "";
+    if (name.length < 2) return { ok: false as const, error: "Kanal yok." };
+    const vars: Record<string, string> = {
+      kanal: name,
+      kanal_adi: name,
+      "konu_türü": typeof row?.konu === "string" ? row.konu.slice(0, 80) : "",
+      kitle: typeof row?.kitle === "string" ? row.kitle.slice(0, 80) : "",
+      ton: typeof row?.stil === "string" ? row.stil.slice(0, 40) : "",
+      stil: typeof row?.stil === "string" ? row.stil.slice(0, 40) : "",
+      kanal_aciklama: typeof row?.aciklama === "string" ? row.aciklama.slice(0, 400) : "",
+      son_konular: typeof row?.konular === "string" && row.konular.trim() ? row.konular.slice(0, 1200) : "yok",
+    };
+    const { chooseProduceText, completeText, runCliText } = await import("./ai-runtime");
+    const route = await chooseProduceText({
+      model: typeof row?.model === "string" ? row.model : "grok-4.5",
+      sealed: sealedOf(row?.sealed),
+    });
+    if (!route.ok) return route;
+    const prompt = promptFor("fikir", vars);
+    const ask = async (extra: string) => {
+      const user = extra ? `${prompt}\n\n${extra}` : prompt;
+      const written =
+        route.via === "api"
+          ? await completeText({
+              model: route.model,
+              system: "Sadece istenen JSON dizisini ver.",
+              user,
+              sealed: sealedOf(row?.sealed),
+              json: false,
+              maxTokens: 1400,
+            })
+          : await runCliText(route.via, user);
+      return written.ok ? written.text : "";
+    };
+    let text = await ask("");
+    let ideas = acceptIdeas(text ? readModelAny(text) : null);
+    if (!ideas || ideas.length < 5) {
+      text = await ask("Tam 5 fikir ver. Yalnızca JSON dizisi. Son konuları tekrarlama.");
+      ideas = acceptIdeas(text ? readModelAny(text) : null);
+    }
+    if (!ideas) return { ok: false as const, error: "Fikirler okunamadı. Yine dene." };
+    return { ok: true as const, label: route.label, ideas };
   });
