@@ -29,6 +29,25 @@ export function narrationChunks(text: string, limit = 1800): string[] {
   return parts;
 }
 
+export function spreadNarration<T extends { voice: string }>(beats: T[], text: string): T[] {
+  const clean = text.replace(/\r\n/g, "\n").trim();
+  if (!beats.length || !clean) return beats;
+  const paragraphs = clean
+    .split(/\n{2,}/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const sentences = clean.split(/(?<=[.!?…])\s+/).filter(Boolean);
+  const pieces =
+    paragraphs.length >= beats.length ? paragraphs : sentences.length >= beats.length ? sentences : clean.split(/\s+/).filter(Boolean);
+  if (!pieces.length) return beats;
+  const size = Math.ceil(pieces.length / beats.length);
+  const joiner = paragraphs.length >= beats.length ? "\n\n" : " ";
+  return beats.map((beat, index) => {
+    const voice = pieces.slice(index * size, (index + 1) * size).join(joiner).trim();
+    return voice ? { ...beat, voice } : beat;
+  });
+}
+
 const WORD_MARKS: Record<number, number> = { 5: 650, 10: 1300, 20: 2600, 30: 3900 };
 
 export function targetWords(minutes: number): number {

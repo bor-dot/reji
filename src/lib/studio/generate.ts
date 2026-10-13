@@ -533,6 +533,72 @@ export const continueBeats = createServerFn({ method: "POST" })
     }
   });
 
+export const writeNarration = createServerFn({ method: "POST" })
+  .validator((input: unknown) => input)
+  .handler(async ({ data }) => {
+    const row = asRecord(data);
+    const title = typeof row?.title === "string" ? row.title.slice(0, 120) : "";
+    if (title.length < 2) return { ok: false as const, error: "Başlık yok." };
+    const sources = typeof row?.sources === "string" ? row.sources.slice(0, 2000) : "";
+    if (row?.needsSources && !sources.trim()) return { ok: false as const, error: "Belgeselde önce kaynak alanını doldur." };
+    const target = typeof row?.target === "number" ? row.target : 650;
+    const soFar = typeof row?.soFar === "number" ? row.soFar : 0;
+    const ask = Math.min(1100, Math.max(160, target - soFar));
+    const previous = typeof row?.previous === "string" ? row.previous.slice(-1800) : "";
+    const language = row?.language === "en" ? "English" : "Turkish";
+    const writer = writerOf(row?.writer);
+    const textModel = typeof row?.textModel === "string" ? row.textModel : "grok-4.5";
+    const system = [
+      "You write only the spoken narration of a YouTube video.",
+      `Write in ${language}.`,
+      `This pass is about ${ask} spoken words.`,
+      "No titles, no timecodes, no shot lists, no screen directions, no markdown headings.",
+      "Do not write [GÖRSEL], [EKRAN] or [ANİMASYON].",
+      "Separate paragraphs with a blank line. The listener hears every word.",
+      "Do not invent sources or claim a fact you were not given.",
+      previous ? "Continue after the text already written. Do not repeat it." : "Start with the opening line.",
+      'Return one JSON object: {"text":"the narration"}',
+    ].join(" ");
+    const user = [
+      `Title: ${title}`,
+      `Promise: ${typeof row?.promise === "string" ? row.promise.slice(0, 400) : ""}`,
+      `Audience: ${typeof row?.audience === "string" ? row.audience.slice(0, 80) : ""}`,
+      `Tone: ${typeof row?.tone === "string" ? row.tone.slice(0, 40) : ""}`,
+      `Channel: ${typeof row?.channelNote === "string" ? row.channelNote.slice(0, 500) : ""}`,
+      sources ? `Sources:\n${sources}` : "",
+      previous ? `Already written:\n${previous}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+    try {
+      const result = await draftText({
+        writer,
+        via: row?.via,
+        model: textModel,
+        system,
+        user,
+        sealed: sealedOf(row?.sealed),
+        maxTokens: 4000,
+      });
+      if (!result.ok) return { ok: false as const, error: result.error };
+      let text = "";
+      try {
+        const parsed = asRecord(extractJson(result.text));
+        if (typeof parsed?.text === "string") text = parsed.text.trim();
+      } catch {
+        text = "";
+      }
+      if (text.length < 40) {
+        const plain = result.text.replace(/```json|```/g, "").trim();
+        if (plain.length > 40 && !plain.startsWith("{")) text = plain;
+      }
+      if (text.length < 40) return { ok: false as const, error: "Metin gelmedi. Tekrar dene." };
+      return { ok: true as const, text, label: result.label };
+    } catch {
+      return { ok: false as const, error: "Bağlantı koptu." };
+    }
+  });
+
 export const startSesleJob = createServerFn({ method: "POST" })
   .validator((input: unknown) => input)
   .handler(async ({ data }) => {

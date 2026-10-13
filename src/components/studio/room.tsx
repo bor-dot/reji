@@ -3,8 +3,8 @@ import { useServerFn } from "@tanstack/react-start";
 import { useEffect, useRef, useState } from "react";
 import { needsSources, type Channel } from "@/lib/studio/channels";
 import { briefKey, critique, scenesFor, scoreOf, toMarkdown, voiceMinutes } from "@/lib/studio/engine";
-import { continueBeats, deepenPack, imagineScene, planTextSource, pollSceneVideo, startSceneVideo } from "@/lib/studio/generate";
-import { countWords, docxBytes, plainText, targetWords } from "@/lib/studio/narration";
+import { continueBeats, deepenPack, imagineScene, planTextSource, pollSceneVideo, startSceneVideo, writeNarration } from "@/lib/studio/generate";
+import { countWords, docxBytes, narrationText, plainText, spreadNarration, targetWords } from "@/lib/studio/narration";
 import { putSceneVideo } from "@/lib/studio/scene-audio";
 import { useStudio } from "@/lib/studio/store";
 import { notify } from "@/lib/studio/toast";
@@ -18,6 +18,7 @@ const STAGES = [
   ["baslik", "Başlık"],
   ["kanca", "Kanca"],
   ["senaryo", "Senaryo"],
+  ["metin", "Metin"],
   ["ses", "Ses"],
   ["cekim", "Çekim"],
   ["kapak", "Kapak"],
@@ -274,6 +275,15 @@ export function Room({ project }: { project: Project }) {
           ) : null}
           {stage === "senaryo" && channel ? (
             <ScriptStage project={project} channel={channel} pack={project.pack} onPatch={(patch) => patchPack(project.id, patch)} />
+          ) : null}
+          {stage === "metin" && channel ? (
+            <TextStage
+              project={project}
+              channel={channel}
+              blocked={blocked}
+              onRefuse={refuseSources}
+              onPatch={(patch) => patchPack(project.id, patch)}
+            />
           ) : null}
           {stage === "ses" && channel ? <VoiceStage project={project} channel={channel} /> : null}
           {stage === "cekim" ? (
@@ -586,6 +596,141 @@ function ScriptStage({
           </div>
         </article>
       ))}
+    </div>
+  );
+}
+
+function TextStage({
+  project,
+  channel,
+  blocked,
+  onRefuse,
+  onPatch,
+}: {
+  project: Project;
+  channel: Channel;
+  blocked: boolean;
+  onRefuse: () => void;
+  onPatch: (patch: Partial<Pack>) => void;
+}) {
+  const { models, keyFor } = useStudio();
+  const write = useServerFn(writeNarration);
+  const plan = useServerFn(planTextSource);
+  const spoken = narrationText(project.pack.beats);
+  const [draft, setDraft] = useState(spoken);
+  const [busy, setBusy] = useState(false);
+  const [writeLabel, setWriteLabel] = useState("");
+  const editing = useRef(false);
+  const target = targetWords(project.brief.minutes);
+  const words = countWords(draft);
+  const short = words < target * 0.85;
+
+  useEffect(() => {
+    if (!editing.current) setDraft(spoken);
+  }, [spoken]);
+
+  function commit(text: string) {
+    onPatch({ beats: spreadNarration(project.pack.beats, text) });
+  }
+
+  async function run(continuing: boolean) {
+    if (blocked) {
+      onRefuse();
+      return;
+    }
+    const blob = keyFor(providerForModel(models.text));
+    const sealed = blob ? { iv: blob.iv, ciphertext: blob.ciphertext } : undefined;
+    setBusy(true);
+    setWriteLabel("Yazıyor…");
+    try {
+      const planned = await withTimeout(
+        plan({ data: { writer: models.writer, textModel: models.text, sealed } }),
+        45_000,
+        "Süre doldu. CLI yoklanamadı.",
+      );
+      if (!planned.ok) {
+        notify(planned.error);
+        return;
+      }
+      const who = planned.via === "api" && models.text.startsWith("grok") ? "Grok" : planned.label;
+      setWriteLabel(`Yazıyor… (${who})`);
+      const res = await withTimeout(
+        write({
+          data: {
+            title: project.brief.title,
+            promise: project.brief.promise,
+            audience: project.brief.audience,
+            tone: project.brief.tone,
+            language: project.brief.language,
+            sources: project.brief.sources ?? "",
+            needsSources: needsSources(channel),
+            channelNote: `${channel.name}. ${channel.topic}. Ton: ${channel.tone}.`,
+            target,
+            soFar: continuing ? words : 0,
+            previous: continuing ? draft : "",
+            textModel: models.text,
+            writer: models.writer,
+            via: planned.via,
+            sealed,
+          },
+        }),
+        190_000,
+        "Süre doldu. Yazım durduruldu.",
+      );
+      if (!res.ok) {
+        notify(res.error);
+        return;
+      }
+      const next = continuing && draft.trim() ? `${draft.trim()}\n\n${res.text}` : res.text;
+      editing.current = false;
+      setDraft(next);
+      commit(next);
+      notify(`${who} metni yazdı.`);
+    } catch (error) {
+      notify(error instanceof Error && error.message.startsWith("Süre") ? error.message : "Metin yazılamadı.");
+    } finally {
+      setBusy(false);
+      setWriteLabel("");
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="text-2xl">Metin</h2>
+          <p className="nums mt-1 text-sm text-faint">
+            {words} / {target} kelime · {project.brief.minutes} dk
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Button onClick={() => void run(false)} disabled={busy}>
+            {busy ? writeLabel || "Yazıyor…" : "Grok yazsın"}
+          </Button>
+          {short ? (
+            <Button variant="line" onClick={() => void run(true)} disabled={busy || words < 40}>
+              Devam et
+            </Button>
+          ) : null}
+          <CopyButton text={draft} />
+        </div>
+      </div>
+      <p className="text-sm text-muted">
+        İzleyicinin duyduğu anlatı. Senaryo zamanı ve görüntüyü tutar; bu metin seslendirmeye gider.
+      </p>
+      <textarea
+        className={`${fieldClass} min-h-80 py-3`}
+        value={draft}
+        placeholder="Grok yazsın, ya da metni buraya yaz."
+        onFocus={() => {
+          editing.current = true;
+        }}
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={() => {
+          editing.current = false;
+          if (draft.trim() !== spoken.trim()) commit(draft);
+        }}
+      />
     </div>
   );
 }
