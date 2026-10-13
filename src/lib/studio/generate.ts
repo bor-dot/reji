@@ -40,7 +40,7 @@ const GeneratedSchema = z.object({
       z.object({
         time: z.string().min(1).max(16),
         title: z.string().min(1).max(80),
-        voice: z.string().min(1).max(700),
+        voice: z.string().min(1).max(1800),
         screen: z.string().min(1).max(160),
         visual: z.string().min(1).max(240),
       }),
@@ -166,7 +166,21 @@ function normalize(raw: unknown): unknown {
         };
       })
     : root.titles;
-  return { ...root, shots, titles };
+  const beats = Array.isArray(root.beats)
+    ? root.beats.map((item) => {
+        const row = asRecord(item);
+        if (!row) return item;
+        return {
+          ...row,
+          time: clip(row.time, 16, "0:00"),
+          title: clip(row.title, 80, "Devam"),
+          voice: clip(row.voice, 1800, "…"),
+          screen: clip(row.screen, 160, "Anlatı"),
+          visual: clip(row.visual, 240, "Sahne sürer."),
+        };
+      })
+    : root.beats;
+  return { ...root, shots, titles, beats };
 }
 
 export function parseGeneratedPack(raw: unknown) {
@@ -180,14 +194,56 @@ function extractJson(text: string): unknown {
   for (const candidate of candidates) {
     const start = candidate.indexOf("{");
     const end = candidate.lastIndexOf("}");
-    if (start < 0 || end <= start) continue;
-    try {
-      return JSON.parse(candidate.slice(start, end + 1)) as unknown;
-    } catch (error) {
-      last = error;
+    const slices = start >= 0 ? [candidate.slice(start), end > start ? candidate.slice(start, end + 1) : ""] : [];
+    for (const slice of slices) {
+      if (!slice) continue;
+      for (const attempt of [slice, repairJson(slice)]) {
+        if (!attempt) continue;
+        try {
+          return JSON.parse(attempt) as unknown;
+        } catch (error) {
+          last = error;
+        }
+      }
     }
   }
   throw last instanceof Error ? last : new Error("JSON yok");
+}
+
+function repairJson(slice: string) {
+  let body = slice.replace(/,\s*"[^"\n]*"?\s*:?\s*"?(?:[^"\\]|\\.)*$/s, "");
+  body = body.replace(/,\s*\{[^}]*$/s, "");
+  body = body.replace(/,\s*$/s, "");
+  const quotes = body.match(/(?<!\\)"/g)?.length ?? 0;
+  if (quotes % 2 === 1) body += '"';
+  const curly = (body.match(/\{/g)?.length ?? 0) - (body.match(/\}/g)?.length ?? 0);
+  const square = (body.match(/\[/g)?.length ?? 0) - (body.match(/\]/g)?.length ?? 0);
+  if (square > 0) body += "]".repeat(square);
+  if (curly > 0) body += "}".repeat(curly);
+  return body;
+}
+
+function salvageNarration(raw: string) {
+  const key = raw.search(/"text"\s*:/);
+  if (key < 0) return "";
+  const quote = raw.indexOf('"', raw.indexOf(":", key) + 1);
+  if (quote < 0) return "";
+  let out = "";
+  for (let index = quote + 1; index < raw.length; index += 1) {
+    const char = raw[index];
+    if (char === "\\") {
+      const next = raw[index + 1];
+      out += next === "n" ? "\n" : next === "t" ? "\t" : next === "u" ? "" : (next ?? "");
+      if (next === "u") index += 4;
+      index += 1;
+      continue;
+    }
+    if (char === '"') break;
+    out += char;
+  }
+  const text = out.trim();
+  const end = Math.max(text.lastIndexOf("."), text.lastIndexOf("!"), text.lastIndexOf("?"), text.lastIndexOf("…"));
+  return end > 40 ? text.slice(0, end + 1).trim() : text;
 }
 
 type SealedKey = { iv: string; ciphertext: string };
@@ -478,7 +534,7 @@ export const sendToKarevo = createServerFn({ method: "POST" })
 const ContinueBeat = z.object({
   time: z.string().min(1).max(16),
   title: z.string().min(1).max(80),
-  voice: z.string().min(1).max(900),
+  voice: z.string().min(1).max(1800),
   screen: z.string().min(1).max(160),
   visual: z.string().min(1).max(240),
 });
@@ -500,7 +556,8 @@ export const continueBeats = createServerFn({ method: "POST" })
       "Continue a YouTube script. Return one JSON object and nothing else.",
       `Write audience-facing strings in ${language}.`,
       `The film still needs spoken words. So far ${soFar} of ${target}.`,
-      "Add the next section only, about 500 to 700 spoken words, ending on a clean beat.",
+      "Add only the next section, about 350 spoken words, split across beats.",
+      "Each voice field stays under 700 characters. End on a finished sentence.",
       "Schema: {beats:[{time,title,voice,screen,visual}]}. time is m:ss. voice is narration only. No directing inside voice.",
       "Do not repeat the previous beat.",
     ].join(" ");
@@ -513,23 +570,43 @@ export const continueBeats = createServerFn({ method: "POST" })
         system,
         user,
         sealed: sealedKey,
-        maxTokens: 4000,
+        maxTokens: 2200,
       });
       if (!result.ok) return { ok: false as const, error: result.error, cut: true };
       let raw: unknown;
       try {
         raw = extractJson(result.text);
       } catch {
-        return { ok: false as const, error: "Metin kesildi.", cut: true };
+        raw = null;
       }
       const root = asRecord(raw);
       const list = Array.isArray(root?.beats) ? root.beats : Array.isArray(raw) ? raw : [];
       const beats = list.flatMap((item) => {
-        const parsed = ContinueBeat.safeParse(item);
-        return parsed.success ? [parsed.data] : [];
+        const row = asRecord(item);
+        const parsed = ContinueBeat.safeParse(
+          row
+            ? {
+                time: clip(row.time, 16, "0:00"),
+                title: clip(row.title, 80, "Devam"),
+                voice: clip(row.voice, 1800, ""),
+                screen: clip(row.screen, 160, "Anlatı"),
+                visual: clip(row.visual, 240, "Sahne sürer."),
+              }
+            : item,
+        );
+        return parsed.success && parsed.data.voice !== "…" ? [parsed.data] : [];
       });
-      if (!beats.length) return { ok: false as const, error: "Devam boş döndü.", cut: true };
-      return { ok: true as const, beats, cut: false };
+      if (!beats.length) {
+        const prose = salvageNarration(result.text) || result.text.replace(/```json|```/g, "").trim();
+        if (prose.length < 80 || prose.startsWith("{")) return { ok: false as const, error: "Metin kesildi. Yine Devam et.", cut: true };
+        return {
+          ok: true as const,
+          beats: [{ time: "devam", title: "Devam", voice: clip(prose, 1800), screen: "Anlatı", visual: "Önceki sahne sürer." }],
+          cut: true,
+        };
+      }
+      const cut = result.text.trim().endsWith("}") ? false : true;
+      return { ok: true as const, beats, cut };
     } catch {
       return { ok: false as const, error: "Bağlantı koptu.", cut: true };
     }
@@ -545,7 +622,7 @@ export const writeNarration = createServerFn({ method: "POST" })
     if (row?.needsSources && !sources.trim()) return { ok: false as const, error: "Belgeselde önce kaynak alanını doldur." };
     const target = typeof row?.target === "number" ? row.target : 650;
     const soFar = typeof row?.soFar === "number" ? row.soFar : 0;
-    const ask = Math.min(1100, Math.max(160, target - soFar));
+    const ask = Math.min(420, Math.max(140, target - soFar));
     const previous = typeof row?.previous === "string" ? row.previous.slice(-1800) : "";
     const language = row?.language === "en" ? "English" : "Turkish";
     const writer = writerOf(row?.writer);
@@ -581,22 +658,25 @@ export const writeNarration = createServerFn({ method: "POST" })
         system,
         user,
         sealed: sealedOf(row?.sealed),
-        maxTokens: 4000,
+        maxTokens: 2200,
       });
       if (!result.ok) return { ok: false as const, error: result.error };
       let text = "";
+      let cut = false;
       try {
         const parsed = asRecord(extractJson(result.text));
         if (typeof parsed?.text === "string") text = parsed.text.trim();
       } catch {
-        text = "";
+        text = salvageNarration(result.text);
+        cut = Boolean(text);
       }
       if (text.length < 40) {
         const plain = result.text.replace(/```json|```/g, "").trim();
         if (plain.length > 40 && !plain.startsWith("{")) text = plain;
       }
-      if (text.length < 40) return { ok: false as const, error: "Metin gelmedi. Tekrar dene." };
-      return { ok: true as const, text, label: result.label };
+      if (text.length < 40) return { ok: false as const, error: "Metin kesildi. Yine Devam et." };
+      if (!result.text.trim().endsWith("}")) cut = true;
+      return { ok: true as const, text, label: result.label, cut };
     } catch {
       return { ok: false as const, error: "Bağlantı koptu." };
     }

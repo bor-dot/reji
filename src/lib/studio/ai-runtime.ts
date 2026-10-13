@@ -100,6 +100,7 @@ export async function completeText(input: {
         provider === "xai" ? "https://api.x.ai/v1/chat/completions" : "https://api.openai.com/v1/chat/completions";
       const res = await fetch(url, {
         method: "POST",
+        signal: AbortSignal.timeout(150_000),
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
         body: JSON.stringify({
           model,
@@ -150,7 +151,8 @@ export async function completeText(input: {
     const body = (await res.json()) as { candidates?: { content?: { parts?: { text?: string }[] } }[] };
     const text = body.candidates?.[0]?.content?.parts?.map((part) => part.text ?? "").join("") ?? "";
     return { ok: true as const, text };
-  } catch {
+  } catch (error) {
+    if (error instanceof Error && error.name === "TimeoutError") return { ok: false as const, error: "Süre doldu. Yine Devam et." };
     return { ok: false as const, error: "Bağlantı koptu." };
   }
 }

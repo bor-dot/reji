@@ -632,7 +632,7 @@ function ScriptStage({
         beats,
         scenes: scenesFor(project.brief, channel, beats, pack.scenes),
       });
-      notify(res.cut ? "Metin kesildi. Yine Devam et." : "Bölüm eklendi.");
+      notify(res.cut ? "Bölüm eklendi. Yine Devam et." : "Bölüm eklendi.");
     } catch (error) {
       notify(error instanceof Error && error.message.startsWith("Süre") ? error.message : "Devam yazılamadı.");
     } finally {
@@ -763,7 +763,7 @@ function TextStage({
       editing.current = false;
       setDraft(next);
       commit(next);
-      notify(`${who} metni yazdı.`);
+      notify(res.cut ? "Bölüm geldi. Yine Devam et." : `${who} metni yazdı.`);
     } catch (error) {
       notify(error instanceof Error && error.message.startsWith("Süre") ? error.message : "Metin yazılamadı.");
     } finally {
