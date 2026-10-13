@@ -397,6 +397,11 @@ export const pollSceneVideo = createServerFn({ method: "POST" })
     return pollVideo(requestId, key);
   });
 
+export const grokLink = createServerFn({ method: "GET" }).handler(async () => {
+  const { describeGrok } = await import("./ai-runtime");
+  return describeGrok();
+});
+
 export const probeLocalClis = createServerFn({ method: "GET" }).handler(async () => {
   const { probeClis } = await import("./ai-runtime");
   return probeClis({ fresh: true });

@@ -262,7 +262,7 @@ export function VoiceStage({ project, channel }: { project: Project; channel: Ch
       <div>
         <h2 className="text-2xl">Ses</h2>
         <p className="mt-1 text-sm text-muted">
-          Sesle siteyi kullanır ya da xAI Ses ile tek istek atar. {channel.name} için önerilen ses {suggested.name}.
+          Grok sesi durur. Sesle ayrı bir giriştir; şifre saklanmaz. {channel.name} için önerilen ses {suggested.name}.
         </p>
       </div>
       <div className="flex gap-2">

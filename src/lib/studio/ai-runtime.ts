@@ -68,6 +68,12 @@ export function resolveKey(provider: ProviderId, sealed?: { iv: string; cipherte
   return null;
 }
 
+export function describeGrok() {
+  return process.env.XAI_API_KEY
+    ? { connected: true as const, via: "platform" as const }
+    : { connected: false as const, via: "yok" as const };
+}
+
 function clipError(status: number, body: string) {
   const clean = body.replace(/sk-[a-zA-Z0-9_-]{8,}/g, "…").replace(/xai-[a-zA-Z0-9_-]{8,}/g, "…").slice(0, 180);
   return `Yanıt ${status}. ${clean}`;
