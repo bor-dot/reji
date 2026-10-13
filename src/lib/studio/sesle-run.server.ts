@@ -4,7 +4,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { SESLE_SELECTORS, SESLE_URL } from "./sesle-selectors";
-import { trackJob } from "./ai-runtime";
+import { trackJob } from "./ai-runtime.server";
 
 export type SesleChunk = {
   index: number;

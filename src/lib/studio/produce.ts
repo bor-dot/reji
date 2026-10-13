@@ -1,11 +1,5 @@
-import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { createServerFn } from "@tanstack/react-start";
-import { openExportFolder, writeShootFiles, type ShootFile } from "./karevo-write";
 import { acceptIdeas, promptFor, readModelAny, readSections, readStep, sectionCount, stepRetryHint, targetWords, type StepName } from "./prompts";
-import { writeProjectBytes } from "./project-files";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -18,30 +12,10 @@ function sealedOf(value: unknown) {
   return { iv: row.iv, ciphertext: row.ciphertext };
 }
 
-function runFile(bin: string, args: string[]) {
-  return new Promise<boolean>((resolve) => {
-    execFile(bin, args, { timeout: 120_000 }, (error) => resolve(!error));
-  });
-}
-
-async function levelAudio(base64: string) {
-  const dir = await mkdtemp(join(tmpdir(), "reji-ses-"));
-  try {
-    const raw = join(dir, "in.mp3");
-    const out = join(dir, "out.mp3");
-    await writeFile(raw, Buffer.from(base64, "base64"));
-    const ok = await runFile("ffmpeg", ["-y", "-i", raw, "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", "-ar", "44100", out]);
-    const bytes = await readFile(ok ? out : raw);
-    return bytes.toString("base64");
-  } finally {
-    await rm(dir, { recursive: true, force: true }).catch((error) => console.warn("Geçici ses klasörü silinemedi.", error));
-  }
-}
-
 export const haltProduce = createServerFn({ method: "POST" })
   .validator((input: unknown) => input)
   .handler(async () => {
-    const { stopTrackedJobs } = await import("./ai-runtime");
+    const { stopTrackedJobs } = await import("./ai-runtime.server");
     return { ok: true as const, stopped: stopTrackedJobs() };
   });
 
@@ -49,7 +23,7 @@ export const planProduceText = createServerFn({ method: "POST" })
   .validator((input: unknown) => input)
   .handler(async ({ data }) => {
     const row = asRecord(data);
-    const { chooseProduceText } = await import("./ai-runtime");
+    const { chooseProduceText } = await import("./ai-runtime.server");
     return chooseProduceText({
       model: typeof row?.model === "string" ? row.model : "grok-4.5",
       sealed: sealedOf(row?.sealed),
@@ -66,8 +40,8 @@ export const produceMedia = createServerFn({ method: "POST" })
     if (prompt.length < 8) return { ok: false as const, error: "Prompt kısa.", copy: false };
     const xai = sealedOf(row?.xai);
     const gemini = sealedOf(row?.gemini);
-    const { grokImagine } = await import("./grok-imagine-run");
-    const { currentWave } = await import("./ai-runtime");
+    const { grokImagine } = await import("./grok-imagine-run.server");
+    const { currentWave } = await import("./ai-runtime.server");
     const wave = currentWave();
     const timeoutMs = kind === "video" ? 600_000 : 180_000;
     const web = await grokImagine({ prompt, kind, aspect, timeoutMs });
@@ -76,7 +50,7 @@ export const produceMedia = createServerFn({ method: "POST" })
     }
     if (web.ok) return { ok: true as const, url: web.url, source: web.source };
     if (kind === "image") {
-      const { imagineImage, geminiImage } = await import("./ai-runtime");
+      const { imagineImage, geminiImage } = await import("./ai-runtime.server");
       const model = typeof row?.imageModel === "string" ? row.imageModel : "grok-imagine-image";
       const xaiImage = await imagineImage(prompt, model, xai);
       if (xaiImage.ok) return { ok: true as const, url: xaiImage.url, source: "xAI" };
@@ -84,7 +58,7 @@ export const produceMedia = createServerFn({ method: "POST" })
       if (gem.ok) return { ok: true as const, url: gem.url, source: "Gemini" };
       return { ok: false as const, error: `${web.error} ${xaiImage.error}`, copy: true };
     }
-    const { startVideo, pollVideo, startVeo, pollVeo } = await import("./ai-runtime");
+    const { startVideo, pollVideo, startVeo, pollVeo } = await import("./ai-runtime.server");
     const videoModel = typeof row?.videoModel === "string" ? row.videoModel : "grok-imagine-video-1.5-lite";
     const started = await startVideo(prompt, videoModel, xai);
     if (started.ok) {
@@ -120,8 +94,9 @@ export const produceVoice = createServerFn({ method: "POST" })
     if (text.length < 2) return { ok: false as const, error: "Ses için metin yok." };
     const folder = typeof row?.folder === "string" ? row.folder.slice(0, 80) : "cekim";
     const voice = typeof row?.sesle === "string" ? row.sesle : "Ultra Epic";
-    const { startSesle, sesleJob } = await import("./sesle-run");
-    const { currentWave } = await import("./ai-runtime");
+    const { startSesle, sesleJob } = await import("./sesle-run.server");
+    const { currentWave } = await import("./ai-runtime.server");
+    const { saveVoiceFile, levelAudio } = await import("./project-files.server");
     const wave = currentWave();
     const started = await startSesle({ folder, voice, speed: 1, chunks: [text] });
     if (currentWave() !== wave) return { ok: false as const, error: "Durduruldu." };
@@ -133,7 +108,7 @@ export const produceVoice = createServerFn({ method: "POST" })
         const job = sesleJob(started.jobId);
         const chunk = job?.chunks[0];
         if (chunk?.status === "tamam" && chunk.audioBase64) {
-          const path = await keepVoice(row, chunk.audioBase64);
+          const path = await saveVoiceFile(row, chunk.audioBase64);
           return { ok: true as const, audioBase64: chunk.audioBase64, source: "Sesle", duration: 0, path };
         }
         if (job?.note === "Durduruldu." || currentWave() !== wave) return { ok: false as const, error: "Durduruldu." };
@@ -141,7 +116,7 @@ export const produceVoice = createServerFn({ method: "POST" })
       }
     }
     if (currentWave() !== wave) return { ok: false as const, error: "Durduruldu." };
-    const { speakText } = await import("./ai-runtime");
+    const { speakText } = await import("./ai-runtime.server");
     const spoken = await speakText({
       text,
       voiceId: typeof row?.xai === "string" ? row.xai : "ultra-epic",
@@ -151,28 +126,17 @@ export const produceVoice = createServerFn({ method: "POST" })
     });
     if (!spoken.ok) return { ok: false as const, error: spoken.error };
     const audioBase64 = await levelAudio(spoken.audioBase64);
-    const path = await keepVoice(row, audioBase64);
+    const path = await saveVoiceFile(row, audioBase64);
     return { ok: true as const, audioBase64, source: "xAI Ses", duration: spoken.duration || 0, path };
   });
-
-async function keepVoice(row: Record<string, unknown> | null, audioBase64: string) {
-  const projectId = typeof row?.projectId === "string" ? row.projectId : "";
-  const index = typeof row?.index === "number" ? row.index : -1;
-  if (!projectId || index < 0) return "";
-  try {
-    return await writeProjectBytes(projectId, "ses", `${String(index + 1).padStart(2, "0")}.mp3`, Buffer.from(audioBase64, "base64"));
-  } catch (error) {
-    console.error("Ses dosyası yazılamadı.", error);
-    return "";
-  }
-}
 
 export const saveShoot = createServerFn({ method: "POST" })
   .validator((input: unknown) => input)
   .handler(async ({ data }) => {
+    const { writeShootFiles } = await import("./karevo-write.server");
     const row = asRecord(data);
     const scenes = Array.isArray(row?.scenes) ? row.scenes : [];
-    const parsed: ShootFile[] = [];
+    const parsed = [];
     for (const item of scenes.slice(0, 24)) {
       const scene = asRecord(item);
       if (!scene || typeof scene.n !== "number") continue;
@@ -200,6 +164,7 @@ export const saveShoot = createServerFn({ method: "POST" })
 export const openShoot = createServerFn({ method: "POST" })
   .validator((input: unknown) => input)
   .handler(async ({ data }) => {
+    const { openExportFolder } = await import("./karevo-write.server");
     const row = asRecord(data);
     const folder = typeof row?.folderName === "string" ? row.folderName : "";
     return openExportFolder(folder);
@@ -243,7 +208,7 @@ export const produceStep = createServerFn({ method: "POST" })
       kapak_stili: typeof row?.kapak === "string" ? row.kapak.slice(0, 400) : "",
       oran: row?.oran === "9:16" ? "9:16" : "16:9",
     };
-    const { completeText } = await import("./ai-runtime");
+    const { completeText } = await import("./ai-runtime.server");
     const model = typeof row?.model === "string" ? row.model : "grok-4.5";
     const sealed = sealedOf(row?.sealed);
     const prompt = promptFor(step, vars);
@@ -321,7 +286,7 @@ export const suggestIdeas = createServerFn({ method: "POST" })
       kanal_aciklama: typeof row?.aciklama === "string" ? row.aciklama.slice(0, 400) : "",
       son_konular: typeof row?.konular === "string" && row.konular.trim() ? row.konular.slice(0, 1200) : "yok",
     };
-    const { completeText } = await import("./ai-runtime");
+    const { completeText } = await import("./ai-runtime.server");
     const prompt = promptFor("fikir", vars);
     const model = typeof row?.model === "string" ? row.model : "grok-4.5";
     const sealed = sealedOf(row?.sealed);

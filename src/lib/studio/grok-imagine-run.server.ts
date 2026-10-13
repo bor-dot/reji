@@ -3,7 +3,7 @@ import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { GROK_IMAGINE_SELECTORS, GROK_IMAGINE_URL } from "./selectors";
-import { trackJob } from "./ai-runtime";
+import { trackJob } from "./ai-runtime.server";
 
 type Locator = {
   count: () => Promise<number>;

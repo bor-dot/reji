@@ -237,16 +237,28 @@ function viaOf(value: unknown): "api" | "grok" | "codex" | "claude" | "gemini" |
   return null;
 }
 
-async function draftText(input: {
-  writer: string;
-  via?: unknown;
+type TextWriter = (input: {
   model: string;
   system: string;
   user: string;
   sealed?: SealedKey;
   maxTokens?: number;
-}): Promise<{ ok: true; text: string; label: string } | { ok: false; error: string; stopped?: boolean }> {
-  const { completeText } = await import("./ai-runtime");
+  json?: boolean;
+  writer?: string;
+}) => Promise<{ ok: true; text: string; via: string } | { ok: false; error: string; stopped?: boolean }>;
+
+async function draftText(
+  completeText: TextWriter,
+  input: {
+    writer: string;
+    via?: unknown;
+    model: string;
+    system: string;
+    user: string;
+    sealed?: SealedKey;
+    maxTokens?: number;
+  },
+): Promise<{ ok: true; text: string; label: string } | { ok: false; error: string; stopped?: boolean }> {
   const hinted = viaOf(input.via);
   const result = await completeText({
     model: input.model,
@@ -304,7 +316,8 @@ export const deepenPack = createServerFn({ method: "POST" })
       .join(" ");
 
     try {
-      const result = await draftText({
+      const { completeText } = await import("./ai-runtime.server");
+      const result = await draftText(completeText, {
         writer,
         via: record?.via,
         model: textModel,
@@ -324,7 +337,7 @@ export const deepenPack = createServerFn({ method: "POST" })
           if (attempt === 1) {
             return { ok: false, error: error instanceof Error ? error.message : "JSON yok" };
           }
-          const again = await draftText({
+          const again = await draftText(completeText, {
             writer,
             via: record?.via,
             model: textModel,
@@ -361,7 +374,7 @@ export const sealProviderKey = createServerFn({ method: "POST" })
       return { ok: false as const, error: "Sağlayıcı yok." };
     }
     if (key.length < 12 || key.length > 400) return { ok: false as const, error: "Anahtar eksik." };
-    const { sealSecret } = await import("./ai-runtime");
+    const { sealSecret } = await import("./ai-runtime.server");
     const sealed = sealSecret(key);
     if (!sealed.ok) return sealed;
     return { ok: true as const, provider, hint: sealed.hint, iv: sealed.iv, ciphertext: sealed.ciphertext };
@@ -376,7 +389,7 @@ export const testProviderKey = createServerFn({ method: "POST" })
       return { ok: false as const, error: "Sağlayıcı yok." };
     }
     const sealed = SealedSchema.safeParse(row?.sealed);
-    const { testProvider } = await import("./ai-runtime");
+    const { testProvider } = await import("./ai-runtime.server");
     return testProvider(provider, sealed.success ? sealed.data : undefined);
   });
 
@@ -391,11 +404,11 @@ export const imagineScene = createServerFn({ method: "POST" })
     const key = sealed.success ? sealed.data : undefined;
     const route = row?.route === "gemini" ? "gemini" : "xai";
     if (route === "gemini") {
-      const { geminiImage } = await import("./ai-runtime");
+      const { geminiImage } = await import("./ai-runtime.server");
       const chosen = model.startsWith("imagen") || model.startsWith("gemini") ? model : "gemini-2.5-flash-image";
       return geminiImage(prompt, chosen, key);
     }
-    const { imagineImage } = await import("./ai-runtime");
+    const { imagineImage } = await import("./ai-runtime.server");
     return imagineImage(prompt, model, key);
   });
 
@@ -410,10 +423,10 @@ export const startSceneVideo = createServerFn({ method: "POST" })
     const key = sealed.success ? sealed.data : undefined;
     const route = row?.route === "gemini" ? "gemini" : "xai";
     if (route === "gemini") {
-      const { startVeo } = await import("./ai-runtime");
+      const { startVeo } = await import("./ai-runtime.server");
       return startVeo(prompt, row?.resolution === "1080p" ? "1080p" : "720p", key);
     }
-    const { startVideo } = await import("./ai-runtime");
+    const { startVideo } = await import("./ai-runtime.server");
     return startVideo(prompt, model, key);
   });
 
@@ -425,20 +438,20 @@ export const pollSceneVideo = createServerFn({ method: "POST" })
     const sealed = SealedSchema.safeParse(row?.sealed);
     const key = sealed.success ? sealed.data : undefined;
     if (row?.route === "gemini") {
-      const { pollVeo } = await import("./ai-runtime");
+      const { pollVeo } = await import("./ai-runtime.server");
       return pollVeo(requestId, key);
     }
-    const { pollVideo } = await import("./ai-runtime");
+    const { pollVideo } = await import("./ai-runtime.server");
     return pollVideo(requestId, key);
   });
 
 export const grokLink = createServerFn({ method: "GET" }).handler(async () => {
-  const { describeGrok } = await import("./ai-runtime");
+  const { describeGrok } = await import("./ai-runtime.server");
   return describeGrok();
 });
 
 export const probeLocalClis = createServerFn({ method: "GET" }).handler(async () => {
-  const { probeClis } = await import("./ai-runtime");
+  const { probeClis } = await import("./ai-runtime.server");
   return probeClis({ fresh: true });
 });
 
@@ -446,7 +459,7 @@ export const planTextSource = createServerFn({ method: "POST" })
   .validator((input: unknown) => input)
   .handler(async ({ data }) => {
     const row = asRecord(data);
-    const { chooseTextRoute } = await import("./ai-runtime");
+    const { chooseTextRoute } = await import("./ai-runtime.server");
     return chooseTextRoute({
       writer: writerOf(row?.writer),
       model: typeof row?.textModel === "string" ? row.textModel : "grok-4.5",
@@ -463,7 +476,7 @@ export const speakScript = createServerFn({ method: "POST" })
     const speed = typeof row?.speed === "number" ? row.speed : 1;
     const language = row?.language === "en" ? "en" : "tr";
     const sealed = SealedSchema.safeParse(row?.sealed);
-    const { speakText } = await import("./ai-runtime");
+    const { speakText } = await import("./ai-runtime.server");
     return speakText({
       text,
       voiceId,
@@ -481,7 +494,7 @@ export const sendToKarevo = createServerFn({ method: "POST" })
     if (!row || typeof row.folderName !== "string" || typeof row.name !== "string" || scenes.length === 0) {
       return { ok: false as const, error: "Paket boş.", missing: [] as string[] };
     }
-    const { sendKarevo } = await import("./karevo-write");
+    const { sendKarevo } = await import("./karevo-write.server");
     const parsed = [];
     for (const item of scenes.slice(0, 24)) {
       const scene = asRecord(item);
@@ -540,7 +553,8 @@ export const continueBeats = createServerFn({ method: "POST" })
     ].join(" ");
     const user = `Title: ${title}\nLast beat:\n${last}`;
     try {
-      const result = await draftText({
+      const { completeText } = await import("./ai-runtime.server");
+      const result = await draftText(completeText, {
         writer,
         via: row?.via,
         model: textModel,
@@ -575,7 +589,7 @@ export const continueBeats = createServerFn({ method: "POST" })
         return parsed.success && parsed.data.voice !== "…" ? [parsed.data] : [];
       });
       if (!beats.length) {
-        const again = await draftText({
+        const again = await draftText(completeText, {
           writer,
           via: row?.via,
           model: textModel,
@@ -666,7 +680,8 @@ export const writeNarration = createServerFn({ method: "POST" })
       .filter(Boolean)
       .join("\n");
     try {
-      const result = await draftText({
+      const { completeText } = await import("./ai-runtime.server");
+      const result = await draftText(completeText, {
         writer,
         via: row?.via,
         model: textModel,
@@ -687,7 +702,7 @@ export const writeNarration = createServerFn({ method: "POST" })
         cut = Boolean(text);
       }
       if (text.length < 40) {
-        const again = await draftText({
+        const again = await draftText(completeText, {
           writer,
           via: row?.via,
           model: textModel,
@@ -726,7 +741,7 @@ export const startSesleJob = createServerFn({ method: "POST" })
     const chunks = Array.isArray(row?.chunks) ? row.chunks.filter((item): item is string => typeof item === "string").slice(0, 12) : [];
     const folder = typeof row?.folder === "string" ? row.folder.replace(/[\\/:*?"<>|]/g, " ").trim().slice(0, 80) : "";
     if (!folder || chunks.length === 0) return { ok: false as const, error: "Sesle için metin yok." };
-    const { startSesle } = await import("./sesle-run");
+    const { startSesle } = await import("./sesle-run.server");
     return startSesle({
       folder,
       voice: typeof row?.voice === "string" ? row.voice.slice(0, 40) : "Ultra Epic",
@@ -741,7 +756,7 @@ export const pollSesleJob = createServerFn({ method: "POST" })
   .handler(async ({ data }) => {
     const row = asRecord(data);
     const id = typeof row?.jobId === "string" ? row.jobId : "";
-    const { sesleJob } = await import("./sesle-run");
+    const { sesleJob } = await import("./sesle-run.server");
     const job = sesleJob(id);
     if (!job) return { ok: false as const, error: "İş yok." };
     return { ok: true as const, job };
