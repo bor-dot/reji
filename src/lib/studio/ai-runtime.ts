@@ -336,9 +336,26 @@ export async function pollVideo(requestId: string, sealed?: { iv: string; cipher
   }
 }
 
+function cliPathDirs() {
+  const extras = [join(homedir(), ".grok", "bin"), "/usr/local/bin"];
+  const fromEnv = (process.env.PATH ?? "").split(delimiter).filter(Boolean);
+  const seen = new Set<string>();
+  const dirs: string[] = [];
+  for (const dir of [...extras, ...fromEnv]) {
+    if (seen.has(dir)) continue;
+    seen.add(dir);
+    dirs.push(dir);
+  }
+  return dirs;
+}
+
+function cliEnv(): NodeJS.ProcessEnv {
+  return { ...process.env, NO_COLOR: "1", PATH: cliPathDirs().join(delimiter) };
+}
+
 function run(bin: string, args: string[]) {
   return new Promise<{ code: number; out: string; missing: boolean }>((resolve) => {
-    execFile(bin, args, { timeout: 8000, env: { ...process.env, NO_COLOR: "1" } }, (error, stdout, stderr) => {
+    execFile(bin, args, { timeout: 8000, env: cliEnv() }, (error, stdout, stderr) => {
       const missing = (error as NodeJS.ErrnoException | null)?.code === "ENOENT";
       const code = typeof error?.code === "number" ? error.code : error ? 1 : 0;
       resolve({ code, out: `${stdout}\n${stderr}`.slice(0, 600), missing });
@@ -347,8 +364,7 @@ function run(bin: string, args: string[]) {
 }
 
 async function findBin(name: string) {
-  const dirs = (process.env.PATH ?? "").split(delimiter).filter(Boolean);
-  for (const dir of dirs) {
+  for (const dir of cliPathDirs()) {
     const full = join(dir, name);
     try {
       await access(full, constants.X_OK);
@@ -373,7 +389,10 @@ function loggedOut(text: string) {
   return /not logged|log in|login required|sign in|authenticate|unauthorized|no credentials|giriş/i.test(text);
 }
 
-export async function probeClis(): Promise<{ platform: string; items: CliProbe[] }> {
+let probeCache: { at: number; value: { platform: string; items: CliProbe[] } } | null = null;
+
+export async function probeClis(opts?: { fresh?: boolean }): Promise<{ platform: string; items: CliProbe[] }> {
+  if (!opts?.fresh && probeCache && Date.now() - probeCache.at < 15_000) return probeCache.value;
   const specs: { id: CliProbe["id"]; login: string }[] = [
     { id: "grok", login: "grok login" },
     { id: "codex", login: "codex login" },
@@ -427,7 +446,9 @@ export async function probeClis(): Promise<{ platform: string; items: CliProbe[]
       detail: ok ? "grok models yanıt verdi." : "grok models giriş doğrulamadı.",
     });
   }
-  return { platform: process.platform, items };
+  const value = { platform: process.platform, items };
+  probeCache = { at: Date.now(), value };
+  return value;
 }
 
 export async function geminiImage(prompt: string, model: string, sealed?: { iv: string; ciphertext: string }) {
@@ -526,22 +547,69 @@ export async function pollVeo(name: string, sealed?: { iv: string; ciphertext: s
   }
 }
 
-export async function completeWithCli(id: "grok" | "codex" | "claude" | "gemini", prompt: string) {
-  const bin = await findBin(id);
-  if (!bin) return { ok: false as const, error: `${id} kurulu değil.` };
-  const args = id === "codex" ? ["exec", "--skip-git-repo-check", prompt] : ["-p", prompt];
-  const result = await new Promise<{ code: number; out: string }>((resolve) => {
+export type CliId = CliProbe["id"];
+
+const CLI_FALLBACK: CliId[] = ["codex", "grok", "claude", "gemini"];
+
+export function sourceLabel(id: "api" | CliId): string {
+  if (id === "api") return "API";
+  if (id === "codex") return "Codex";
+  if (id === "grok") return "Grok";
+  if (id === "claude") return "Claude";
+  return "Gemini";
+}
+
+export async function chooseTextRoute(input: {
+  writer: string;
+  model: string;
+  sealed?: { iv: string; ciphertext: string };
+}): Promise<{ ok: true; via: "api" | CliId; label: string } | { ok: false; error: string }> {
+  const specific = CLI_FALLBACK.includes(input.writer as CliId) ? (input.writer as CliId) : null;
+  const provider = TEXT_MODELS[input.model] ?? "xai";
+  const hasKey = Boolean(resolveKey(provider, input.sealed));
+  if (input.writer !== "cli" && !specific && hasKey) return { ok: true, via: "api", label: "API" };
+  const probe = await probeClis();
+  const bagli = new Set(probe.items.filter((row) => row.status === "bagli").map((row) => row.id));
+  const order: CliId[] = [];
+  if (specific) order.push(specific);
+  for (const id of CLI_FALLBACK) if (!order.includes(id)) order.push(id);
+  const via = order.find((id) => bagli.has(id));
+  if (!via) return { ok: false, error: "Bağlı CLI yok. Ayarlar'dan giriş yap ya da API anahtarı ekle." };
+  return { ok: true, via, label: sourceLabel(via) };
+}
+
+export async function runCliText(cli: CliId, prompt: string) {
+  if (!CLI_FALLBACK.includes(cli)) return { ok: false as const, error: "CLI yok." };
+  const bin = await findBin(cli);
+  if (!bin) return { ok: false as const, error: `${sourceLabel(cli)} kurulu değil.` };
+  const args = cli === "codex" ? ["exec", "--skip-git-repo-check", prompt] : ["-p", prompt];
+  const result = await new Promise<{ code: number; stdout: string; stderr: string; timedOut: boolean }>((resolve) => {
     execFile(
       bin,
       args,
-      { timeout: 180_000, maxBuffer: 8_000_000, env: { ...process.env, NO_COLOR: "1" } },
+      { timeout: 180_000, maxBuffer: 8_000_000, killSignal: "SIGKILL", env: cliEnv() },
       (error, stdout, stderr) => {
-        const code = typeof error?.code === "number" ? error.code : error ? 1 : 0;
-        resolve({ code, out: `${stdout}\n${stderr}`.slice(0, 200_000) });
+        const err = error as (NodeJS.ErrnoException & { killed?: boolean }) | null;
+        const timedOut = Boolean(err?.killed) || err?.code === "ETIMEDOUT";
+        const code = typeof err?.code === "number" ? err.code : err ? 1 : 0;
+        resolve({
+          code,
+          stdout: String(stdout ?? "").slice(0, 200_000),
+          stderr: String(stderr ?? "").slice(0, 4_000),
+          timedOut,
+        });
       },
     );
   });
-  const text = result.out.trim();
-  if (!text || loggedOut(text)) return { ok: false as const, error: `${id} yanıt vermedi. Giriş gerekebilir.` };
-  return { ok: true as const, text };
+  if (result.timedOut) return { ok: false as const, error: `${sourceLabel(cli)} 180 sn içinde yanıt vermedi.` };
+  const text = result.stdout.trim();
+  const errText = result.stderr.trim();
+  if (text.includes("{") && text.length > 40) return { ok: true as const, text };
+  if (loggedOut(`${text}\n${errText}`)) return { ok: false as const, error: `${sourceLabel(cli)} giriş istiyor.` };
+  if (text) return { ok: true as const, text };
+  return { ok: false as const, error: `${sourceLabel(cli)} yanıt vermedi.` };
+}
+
+export async function completeWithCli(id: CliId, prompt: string) {
+  return runCliText(id, prompt);
 }

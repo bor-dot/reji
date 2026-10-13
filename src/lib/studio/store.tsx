@@ -28,7 +28,7 @@ export type ModelPrefs = {
   image: string;
   video: string;
   videoSize: "720p" | "1080p";
-  writer: "api" | "grok" | "codex" | "claude" | "gemini";
+  writer: "api" | "cli" | "grok" | "codex" | "claude" | "gemini";
 };
 
 export const DEFAULT_MODELS: ModelPrefs = {
@@ -41,7 +41,8 @@ export const DEFAULT_MODELS: ModelPrefs = {
 
 function modelsOf(raw?: Partial<ModelPrefs>): ModelPrefs {
   const writer = raw?.writer;
-  const allowed = writer === "grok" || writer === "codex" || writer === "claude" || writer === "gemini" || writer === "api";
+  const allowed =
+    writer === "cli" || writer === "grok" || writer === "codex" || writer === "claude" || writer === "gemini" || writer === "api";
   return {
     ...DEFAULT_MODELS,
     ...raw,

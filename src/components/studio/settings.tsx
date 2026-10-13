@@ -35,10 +35,11 @@ const VIDEO_MODELS = [
 
 const WRITERS = [
   ["api", "API"],
-  ["grok", "grok CLI"],
-  ["codex", "codex CLI"],
-  ["claude", "claude CLI"],
-  ["gemini", "gemini CLI"],
+  ["cli", "CLI (otomatik)"],
+  ["codex", "Codex"],
+  ["grok", "Grok"],
+  ["claude", "Claude"],
+  ["gemini", "Gemini"],
 ];
 
 const STATUS_LABEL = {
@@ -148,18 +149,21 @@ export function Settings() {
           onChange={(videoSize) => setModels({ videoSize: videoSize === "1080p" ? "1080p" : "720p" })}
         />
         <ModelSelect
-          label="Metin yolu"
+          label="Metin kaynağı"
           value={models.writer}
           options={WRITERS}
-          onChange={(writer) =>
-            setModels({
-              writer: writer === "grok" || writer === "codex" || writer === "claude" || writer === "gemini" ? writer : "api",
-            })
-          }
+          onChange={(value) => {
+            const writer =
+              value === "cli" || value === "grok" || value === "codex" || value === "claude" || value === "gemini" || value === "api"
+                ? value
+                : "api";
+            setModels({ writer });
+          }}
         />
         <p className="text-sm text-faint">
-          Sahne, xAI, Gemini ya da elle kopyayı kendi seçer. Metin yolu bir CLI ise ve o CLI bağlıysa Grok ile yaz
-          API yerine onu çağırır. Anahtar yoksa bağlı bir CLI'ya geçilir.
+          Sahne, xAI, Gemini ya da elle kopyayı kendi seçer. Metin kaynağı API ise anahtar kullanılır. CLI (otomatik)
+          bağlı olanı seçer. Belirli bir CLI seçiliyse o öne alınır, değilse sıra Codex, Grok, Claude, Gemini. Anahtar
+          yoksa da CLI'ya düşer.
         </p>
       </section>
 

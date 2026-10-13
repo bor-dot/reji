@@ -174,16 +174,84 @@ export function parseGeneratedPack(raw: unknown) {
 }
 
 function extractJson(text: string): unknown {
-  const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-  if (start < 0 || end <= start) throw new Error("JSON yok");
-  return JSON.parse(text.slice(start, end + 1)) as unknown;
+  const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(text);
+  const candidates = fenced ? [fenced[1], text] : [text];
+  let last: unknown;
+  for (const candidate of candidates) {
+    const start = candidate.indexOf("{");
+    const end = candidate.lastIndexOf("}");
+    if (start < 0 || end <= start) continue;
+    try {
+      return JSON.parse(candidate.slice(start, end + 1)) as unknown;
+    } catch (error) {
+      last = error;
+    }
+  }
+  throw last instanceof Error ? last : new Error("JSON yok");
+}
+
+type SealedKey = { iv: string; ciphertext: string };
+
+function writerOf(value: unknown) {
+  if (value === "cli" || value === "grok" || value === "codex" || value === "claude" || value === "gemini") return value;
+  return "api" as const;
+}
+
+function sealedOf(value: unknown): SealedKey | undefined {
+  const sealed = asRecord(value);
+  if (sealed && typeof sealed.iv === "string" && typeof sealed.ciphertext === "string") {
+    return { iv: sealed.iv, ciphertext: sealed.ciphertext };
+  }
+  return undefined;
+}
+
+function viaOf(value: unknown): "api" | "grok" | "codex" | "claude" | "gemini" | null {
+  if (value === "api" || value === "grok" || value === "codex" || value === "claude" || value === "gemini") return value;
+  return null;
+}
+
+async function draftText(input: {
+  writer: string;
+  via?: unknown;
+  model: string;
+  system: string;
+  user: string;
+  sealed?: SealedKey;
+  maxTokens?: number;
+}): Promise<{ ok: true; text: string; label: string } | { ok: false; error: string }> {
+  const { chooseTextRoute, completeText, runCliText, sourceLabel } = await import("./ai-runtime");
+  const hinted = viaOf(input.via);
+  const route = hinted
+    ? { ok: true as const, via: hinted, label: sourceLabel(hinted) }
+    : await chooseTextRoute({ writer: input.writer, model: input.model, sealed: input.sealed });
+  if (!route.ok) return route;
+  const prompt = `${input.system}\n\n${input.user}`;
+  if (route.via !== "api") {
+    const cli = await runCliText(route.via, prompt);
+    if (!cli.ok) return cli;
+    return { ok: true, text: cli.text, label: route.label };
+  }
+  const result = await completeText({
+    model: input.model,
+    system: input.system,
+    user: input.user,
+    sealed: input.sealed,
+    json: true,
+    maxTokens: input.maxTokens,
+  });
+  if (result.ok) return { ok: true, text: result.text, label: "API" };
+  if (!/anahtar yok/i.test(result.error)) return result;
+  const fallback = await chooseTextRoute({ writer: "cli", model: input.model, sealed: input.sealed });
+  if (!fallback.ok || fallback.via === "api") return result;
+  const cli = await runCliText(fallback.via, prompt);
+  if (!cli.ok) return cli;
+  return { ok: true, text: cli.text, label: fallback.label };
 }
 
 export const deepenPack = createServerFn({ method: "POST" })
   .validator((input: unknown) => input)
   .handler(async ({ data }): Promise<
-    { ok: true; pack: GeneratedPack } | { ok: false; error: string }
+    { ok: true; pack: GeneratedPack; label: string } | { ok: false; error: string }
   > => {
     const record = asRecord(data);
     const briefInput = record && typeof record.title === "string" ? record : record?.brief;
@@ -195,19 +263,15 @@ export const deepenPack = createServerFn({ method: "POST" })
       return { ok: false, error: "Belgeselde önce kaynak alanını doldur." };
     }
     const textModel = typeof record?.textModel === "string" ? record.textModel : "grok-4.5";
-    const sealed = asRecord(record?.sealed);
-    const sealedKey =
-      sealed && typeof sealed.iv === "string" && typeof sealed.ciphertext === "string"
-        ? { iv: sealed.iv, ciphertext: sealed.ciphertext }
-        : undefined;
+    const writer = writerOf(record?.writer);
+    const sealedKey = sealedOf(record?.sealed);
     const channelNote = typeof record?.channelNote === "string" ? record.channelNote.slice(0, 800) : "";
-    const writer = record?.writer === "grok" || record?.writer === "codex" || record?.writer === "claude" || record?.writer === "gemini" ? record.writer : "api";
 
     const lang = brief.language === "en" ? "English" : "Turkish";
     const system = [
       "You are a YouTube showrunner writing a production pack.",
       `Write every audience-facing string in ${lang}.`,
-      "Return one JSON object and nothing else.",
+      "Return one JSON object and nothing else. A json code fence is allowed if the tool requires it.",
       "The video must be able to pay every claim. No fake curiosity, no fear in children's films, no sarcasm aimed at a child.",
       "For belgesel: claim and evidence live in different sentences. Do not invent sources beyond the ones given.",
       "For cocuk: 3–6 age, warm, a repeatable line, no monster, no death.",
@@ -225,23 +289,14 @@ export const deepenPack = createServerFn({ method: "POST" })
       .join(" ");
 
     try {
-      const { completeText, completeWithCli, probeClis } = await import("./ai-runtime");
-      const user = JSON.stringify(brief);
-      const prompt = `${system}\n\n${user}`;
-      let result: { ok: true; text: string } | { ok: false; error: string };
-      if (writer !== "api") {
-        const probe = await probeClis();
-        const item = probe.items.find((row) => row.id === writer);
-        if (item?.status !== "bagli") return { ok: false, error: `${writer} bağlı değil.` };
-        result = await completeWithCli(writer, prompt);
-      } else {
-        result = await completeText({ model: textModel, system, user, sealed: sealedKey, json: true });
-        if (!result.ok && /anahtar yok/i.test(result.error)) {
-          const probe = await probeClis();
-          const item = probe.items.find((row) => row.status === "bagli");
-          if (item) result = await completeWithCli(item.id, prompt);
-        }
-      }
+      const result = await draftText({
+        writer,
+        via: record?.via,
+        model: textModel,
+        system,
+        user: JSON.stringify(brief),
+        sealed: sealedKey,
+      });
       if (!result.ok) return { ok: false, error: result.error };
       let parsedPack: ReturnType<typeof extractJson>;
       try {
@@ -253,7 +308,7 @@ export const deepenPack = createServerFn({ method: "POST" })
       if (!pack.success) {
         return { ok: false, error: "Paket eksik döndü. Senaryoda Devam et ya da masa kalıbında kal." };
       }
-      return { ok: true, pack: pack.data };
+      return { ok: true, pack: pack.data, label: result.label };
     } catch {
       return { ok: false, error: "Bağlantı koptu. Masa kalıbı duruyor." };
     }
@@ -344,8 +399,20 @@ export const pollSceneVideo = createServerFn({ method: "POST" })
 
 export const probeLocalClis = createServerFn({ method: "GET" }).handler(async () => {
   const { probeClis } = await import("./ai-runtime");
-  return probeClis();
+  return probeClis({ fresh: true });
 });
+
+export const planTextSource = createServerFn({ method: "POST" })
+  .validator((input: unknown) => input)
+  .handler(async ({ data }) => {
+    const row = asRecord(data);
+    const { chooseTextRoute } = await import("./ai-runtime");
+    return chooseTextRoute({
+      writer: writerOf(row?.writer),
+      model: typeof row?.textModel === "string" ? row.textModel : "grok-4.5",
+      sealed: sealedOf(row?.sealed),
+    });
+  });
 
 export const speakScript = createServerFn({ method: "POST" })
   .validator((input: unknown) => input)
@@ -419,13 +486,9 @@ export const continueBeats = createServerFn({ method: "POST" })
     const last = typeof row?.last === "string" ? row.last.slice(0, 500) : "";
     const language = row?.language === "en" ? "English" : "Turkish";
     if (title.length < 2) return { ok: false as const, error: "Başlık yok.", cut: false };
-    const writer = row?.writer === "grok" || row?.writer === "codex" || row?.writer === "claude" || row?.writer === "gemini" ? row.writer : "api";
+    const writer = writerOf(row?.writer);
     const textModel = typeof row?.textModel === "string" ? row.textModel : "grok-4.5";
-    const sealed = asRecord(row?.sealed);
-    const sealedKey =
-      sealed && typeof sealed.iv === "string" && typeof sealed.ciphertext === "string"
-        ? { iv: sealed.iv, ciphertext: sealed.ciphertext }
-        : undefined;
+    const sealedKey = sealedOf(row?.sealed);
     const system = [
       "Continue a YouTube script. Return one JSON object and nothing else.",
       `Write audience-facing strings in ${language}.`,
@@ -436,22 +499,15 @@ export const continueBeats = createServerFn({ method: "POST" })
     ].join(" ");
     const user = `Title: ${title}\nLast beat:\n${last}`;
     try {
-      const { completeText, completeWithCli, probeClis } = await import("./ai-runtime");
-      let result: { ok: true; text: string } | { ok: false; error: string };
-      if (writer !== "api") {
-        const probe = await probeClis();
-        const item = probe.items.find((cli) => cli.id === writer);
-        if (item?.status !== "bagli") return { ok: false as const, error: `${writer} bağlı değil.`, cut: false };
-        result = await completeWithCli(writer, `${system}\n\n${user}`);
-      } else {
-        result = await completeText({ model: textModel, system, user, sealed: sealedKey, json: true, maxTokens: 4000 });
-        if (!result.ok && /anahtar yok/i.test(result.error)) {
-          const probe = await probeClis();
-          const item = probe.items.find((cli) => cli.status === "bagli");
-          if (!item) return { ok: false as const, error: result.error, cut: false };
-          result = await completeWithCli(item.id, `${system}\n\n${user}`);
-        }
-      }
+      const result = await draftText({
+        writer,
+        via: row?.via,
+        model: textModel,
+        system,
+        user,
+        sealed: sealedKey,
+        maxTokens: 4000,
+      });
       if (!result.ok) return { ok: false as const, error: result.error, cut: true };
       let raw: unknown;
       try {

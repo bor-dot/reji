@@ -3,7 +3,7 @@ import { useServerFn } from "@tanstack/react-start";
 import { useEffect, useRef, useState } from "react";
 import { needsSources, type Channel } from "@/lib/studio/channels";
 import { briefKey, critique, scenesFor, scoreOf, toMarkdown, voiceMinutes } from "@/lib/studio/engine";
-import { continueBeats, deepenPack, imagineScene, pollSceneVideo, startSceneVideo } from "@/lib/studio/generate";
+import { continueBeats, deepenPack, imagineScene, planTextSource, pollSceneVideo, startSceneVideo } from "@/lib/studio/generate";
 import { countWords, docxBytes, plainText, targetWords } from "@/lib/studio/narration";
 import { putSceneVideo } from "@/lib/studio/scene-audio";
 import { useStudio } from "@/lib/studio/store";
@@ -27,6 +27,22 @@ const STAGES = [
 ] as const;
 
 type StageId = (typeof STAGES)[number][0];
+
+function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => reject(new Error(message)), ms);
+    promise.then(
+      (value) => {
+        window.clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        window.clearTimeout(timer);
+        reject(error instanceof Error ? error : new Error(message));
+      },
+    );
+  });
+}
 
 function StageDock({ stage, onPick }: { stage: StageId; onPick: (id: StageId) => void }) {
   const [open, setOpen] = useState(false);
@@ -83,8 +99,10 @@ function providerForModel(model: string) {
 export function Room({ project }: { project: Project }) {
   const { channels, patchBrief, patchPack, rebuild, applyGenerated, addSeries, models, keyFor } = useStudio();
   const deepen = useServerFn(deepenPack);
+  const plan = useServerFn(planTextSource);
   const [stage, setStage] = useState<StageId>("baslik");
   const [busy, setBusy] = useState(false);
+  const [writeLabel, setWriteLabel] = useState("");
   const [error, setError] = useState("");
   const [armRebuild, setArmRebuild] = useState(false);
   const channel = channels.find((item) => item.id === project.channelId) ?? channels[0];
@@ -112,32 +130,51 @@ export function Room({ project }: { project: Project }) {
       return;
     }
     setBusy(true);
+    setWriteLabel("Yazıyor…");
     setError("");
     try {
-      const res = await deepen({
-        data: {
-          brief: project.brief,
-          needsSources: needsSources(channel),
-          textModel: models.text,
-          sealed: sealedFor(models.text),
-          channelNote: `${channel.name}. ${channel.topic}. ${channel.visualStyle}. ${channel.coverStyle}. Ton: ${channel.tone}.`,
-          writer: models.writer,
-        },
-      });
+      const sealed = sealedFor(models.text);
+      const planned = await withTimeout(
+        plan({ data: { writer: models.writer, textModel: models.text, sealed } }),
+        45_000,
+        "Süre doldu. CLI yoklanamadı.",
+      );
+      if (!planned.ok) {
+        setError(planned.error);
+        notify(planned.error);
+        return;
+      }
+      setWriteLabel(`Yazıyor… (${planned.label})`);
+      const res = await withTimeout(
+        deepen({
+          data: {
+            brief: project.brief,
+            needsSources: needsSources(channel),
+            textModel: models.text,
+            sealed,
+            channelNote: `${channel.name}. ${channel.topic}. ${channel.visualStyle}. ${channel.coverStyle}. Ton: ${channel.tone}.`,
+            writer: models.writer,
+            via: planned.via,
+          },
+        }),
+        190_000,
+        "Süre doldu. Yazım durduruldu.",
+      );
       if (!res.ok) {
         setError(res.error);
         notify(res.error);
       } else {
         applyGenerated(project.id, res.pack);
         setStage("baslik");
-        notify("Grok paketi yazıldı.");
+        notify(planned.label === "API" ? "Grok paketi yazıldı." : `${planned.label} paketi yazıldı.`);
       }
-    } catch {
-      const text = "İstek tamamlanamadı. Masa kalıbı duruyor.";
+    } catch (error) {
+      const text = error instanceof Error && error.message.startsWith("Süre") ? error.message : "İstek tamamlanamadı. Masa kalıbı duruyor.";
       setError(text);
       notify(text);
     } finally {
       setBusy(false);
+      setWriteLabel("");
     }
   }
 
@@ -188,7 +225,7 @@ export function Room({ project }: { project: Project }) {
               {armRebuild ? "Grok metninin üstüne yaz" : "Kalıbı kur"}
             </Button>
             <Button onClick={() => void onGrok()} disabled={busy}>
-              {busy ? "Grok yazıyor" : "Grok ile yaz"}
+              {busy ? writeLabel || "Yazıyor…" : "Grok ile yaz"}
             </Button>
           </div>
         </div>
@@ -451,7 +488,9 @@ function ScriptStage({
 }) {
   const { models, keyFor, patchPack } = useStudio();
   const cont = useServerFn(continueBeats);
+  const plan = useServerFn(planTextSource);
   const [busy, setBusy] = useState(false);
+  const [writeLabel, setWriteLabel] = useState("");
   function edit(index: number, patch: Partial<Beat>) {
     onPatch({
       beats: pack.beats.map((beat, i) => (i === index ? { ...beat, ...patch } : beat)),
@@ -465,20 +504,37 @@ function ScriptStage({
   async function resume() {
     const last = pack.beats[pack.beats.length - 1];
     const blob = keyFor(providerForModel(models.text));
+    const sealed = blob ? { iv: blob.iv, ciphertext: blob.ciphertext } : undefined;
     setBusy(true);
+    setWriteLabel("Yazıyor…");
     try {
-      const res = await cont({
-        data: {
-          title: project.brief.title,
-          language: project.brief.language,
-          soFar: words,
-          target,
-          last: last ? `${last.time} ${last.title}\n${last.voice}` : "",
-          textModel: models.text,
-          writer: models.writer,
-          sealed: blob ? { iv: blob.iv, ciphertext: blob.ciphertext } : undefined,
-        },
-      });
+      const planned = await withTimeout(
+        plan({ data: { writer: models.writer, textModel: models.text, sealed } }),
+        45_000,
+        "Süre doldu. CLI yoklanamadı.",
+      );
+      if (!planned.ok) {
+        notify(planned.error);
+        return;
+      }
+      setWriteLabel(`Yazıyor… (${planned.label})`);
+      const res = await withTimeout(
+        cont({
+          data: {
+            title: project.brief.title,
+            language: project.brief.language,
+            soFar: words,
+            target,
+            last: last ? `${last.time} ${last.title}\n${last.voice}` : "",
+            textModel: models.text,
+            writer: models.writer,
+            via: planned.via,
+            sealed,
+          },
+        }),
+        190_000,
+        "Süre doldu. Yazım durduruldu.",
+      );
       if (!res.ok) {
         notify(res.error);
         return;
@@ -489,10 +545,11 @@ function ScriptStage({
         scenes: scenesFor(project.brief, channel, beats, pack.scenes),
       });
       notify(res.cut ? "Metin kesildi. Yine Devam et." : "Bölüm eklendi.");
-    } catch {
-      notify("Devam yazılamadı.");
+    } catch (error) {
+      notify(error instanceof Error && error.message.startsWith("Süre") ? error.message : "Devam yazılamadı.");
     } finally {
       setBusy(false);
+      setWriteLabel("");
     }
   }
 
@@ -508,7 +565,7 @@ function ScriptStage({
         <div className="flex flex-wrap gap-2">
           {short ? (
             <Button onClick={() => void resume()} disabled={busy}>
-              {busy ? "Yazıyor" : "Devam et"}
+              {busy ? writeLabel || "Yazıyor…" : "Devam et"}
             </Button>
           ) : null}
           <CopyButton text={script} />
