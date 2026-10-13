@@ -181,7 +181,7 @@ export function Room({ project }: { project: Project }) {
   const [writeLabel, setWriteLabel] = useState("");
   const [error, setError] = useState("");
   const [armRebuild, setArmRebuild] = useState(false);
-  const [producing, setProducing] = useState(false);
+  const [producing, setProducing] = useState<null | "adim" | "tek">(null);
   const channel = channels.find((item) => item.id === project.channelId) ?? channels[0];
   const blocked = Boolean(channel && needsSources(channel) && !(project.brief.sources ?? "").trim());
 
@@ -302,12 +302,25 @@ export function Room({ project }: { project: Project }) {
               {armRebuild ? "Grok metninin üstüne yaz" : "Kalıbı kur"}
             </Button>
             <Button
+              variant="line"
               onClick={() => {
                 if (blocked) {
                   refuseSources();
                   return;
                 }
-                setProducing(true);
+                setProducing("tek");
+              }}
+              disabled={busy}
+            >
+              Tek tuşla üret
+            </Button>
+            <Button
+              onClick={() => {
+                if (blocked) {
+                  refuseSources();
+                  return;
+                }
+                setProducing("adim");
               }}
               disabled={busy}
             >
@@ -332,7 +345,7 @@ export function Room({ project }: { project: Project }) {
 
       <StageDock stage={stage} onPick={setStage} />
       {producing && channel ? (
-        <ProduceScreen project={project} channel={channel} onClose={() => setProducing(false)} />
+        <ProduceScreen project={project} channel={channel} auto={producing === "tek"} onClose={() => setProducing(null)} />
       ) : null}
 
       <div className="grid gap-6 lg:grid-cols-[12rem_minmax(0,1fr)] lg:gap-8">
