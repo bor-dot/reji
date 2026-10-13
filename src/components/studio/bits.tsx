@@ -50,7 +50,8 @@ export function CopyButton({ text, label = "Kopyala" }: { text: string; label?: 
         try {
           await navigator.clipboard.writeText(text);
           setState("ok");
-        } catch {
+        } catch (error) {
+      console.warn(error);
           setState("fail");
         }
         window.setTimeout(() => setState("idle"), 1600);

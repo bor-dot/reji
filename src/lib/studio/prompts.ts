@@ -1,4 +1,4 @@
-import { cleanSpeech } from "./speech-clean";
+import { cleanSpeech } from "./speech-clean.ts";
 
 export type StepName =
   | "baslik"
@@ -98,26 +98,148 @@ export function sectionCount(minutes: number) {
   return Math.max(4, Math.min(12, Math.round(value)));
 }
 
-export function readModelJson(text: string): Record<string, unknown> | null {
+function sliceJson(text: string, start: number) {
+  const open = text[start];
+  const close = open === "{" ? "}" : "]";
+  let depth = 0;
+  let quote = false;
+  let escape = false;
+  for (let index = start; index < text.length; index += 1) {
+    const char = text[index];
+    if (quote) {
+      if (escape) escape = false;
+      else if (char === "\\") escape = true;
+      else if (char === '"') quote = false;
+      continue;
+    }
+    if (char === '"') quote = true;
+    else if (char === open) depth += 1;
+    else if (char === close) {
+      depth -= 1;
+      if (depth === 0) return text.slice(start, index + 1);
+    }
+  }
+  return "";
+}
+
+export function readModelAny(text: string): unknown {
   const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(text);
-  const candidates = fenced ? [fenced[1], text] : [text];
-  for (const candidate of candidates) {
-    const start = candidate.indexOf("{");
-    const end = candidate.lastIndexOf("}");
-    const slices = start >= 0 ? [end > start ? candidate.slice(start, end + 1) : "", candidate.slice(start)] : [];
-    for (const slice of slices) {
+  const sources = fenced ? [fenced[1], text] : [text];
+  for (const source of sources) {
+    for (let index = 0; index < source.length; index += 1) {
+      const char = source[index];
+      if (char !== "{" && char !== "[") continue;
+      const slice = sliceJson(source, index);
       if (!slice) continue;
       for (const attempt of [slice, repairJson(slice)]) {
         try {
-          const value = JSON.parse(attempt) as unknown;
-          if (value && typeof value === "object" && !Array.isArray(value)) return value as Record<string, unknown>;
-        } catch {
-          /* sonraki deneme */
+          return JSON.parse(attempt) as unknown;
+        } catch (error) {
+          console.warn("JSON bloğu okunamadı.", error instanceof Error ? error.message : error);
         }
       }
     }
   }
   return null;
+}
+
+export function readModelJson(text: string): Record<string, unknown> | null {
+  const value = readModelAny(text);
+  if (value && typeof value === "object" && !Array.isArray(value)) return value as Record<string, unknown>;
+  return null;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+function acceptProse(step: "senaryo" | "metin" | "kanca", text: string): StepResult | null {
+  const body = text.replace(/```[\s\S]*?```/g, " ").replace(/\s+/g, " ").trim();
+  if (step === "kanca") {
+    const lines = text
+      .split(/\n+/)
+      .map((line) => line.replace(/^[-*\d.)\s]+/, "").trim())
+      .filter((line) => line.length >= 20);
+    const hooks = (lines.length ? lines : body.split(/(?<=[.!?])\s+/)).filter((line) => line.length >= 20).slice(0, 3);
+    if (!hooks.length) return null;
+    return {
+      kancalar: hooks,
+      secilen: 0,
+      hooks: hooks.map((line) => ({ window: "0:00-0:15", line, visual: "Tek açılış planı.", cut: "Söz bitince kes." })),
+    };
+  }
+  if (step === "metin") {
+    const cleaned = cleanSpeech(text);
+    if (cleaned.blocked || cleaned.text.length < 12) return null;
+    return { parcalar: cleaned.pieces.length ? cleaned.pieces : [cleaned.text] };
+  }
+  const chunks = text
+    .split(/\n{2,}/)
+    .map((chunk) => chunk.trim())
+    .filter((chunk) => chunk.length > 30);
+  let parts = chunks;
+  if (parts.length < 3) {
+    const sentences = body.split(/(?<=[.!?])\s+/).filter((sentence) => sentence.length > 8);
+    parts = [];
+    let buf: string[] = [];
+    for (const sentence of sentences) {
+      buf.push(sentence);
+      if (buf.join(" ").length > 280) {
+        parts.push(buf.join(" "));
+        buf = [];
+      }
+    }
+    if (buf.length) parts.push(buf.join(" "));
+  }
+  const bolumler = parts
+    .slice(0, 16)
+    .map((metin, index) => {
+      const first = metin.split("\n")[0] ?? "";
+      const heading = metin.includes("\n") ? first.replace(/^#{1,3}\s*/, "").trim() : "";
+      const baslik = heading.length >= 4 && heading.length <= 80 ? heading : `Bölüm ${index + 1}`;
+      return { baslik: baslik.slice(0, 80), metin: cleanSpeech(metin).text };
+    })
+    .filter((item) => item.metin.length >= 8);
+  if (!bolumler.length) return null;
+  return readSections({ bolumler }, 1);
+}
+
+const TEXT_STEPS = new Set<StepName>(["senaryo", "metin", "kanca"]);
+
+export function readStep(
+  step: StepName,
+  text: string,
+  ctx: { konu?: string; anlatim?: string; benzer?: string } = {},
+): StepResult | null {
+  const any = readModelAny(text);
+  if (step === "fikir") {
+    const ideas = acceptIdeas(any);
+    return ideas ? { ideas } : null;
+  }
+  const record = asRecord(any);
+  if (record) {
+    const accepted = acceptStep(step, record, ctx);
+    if (accepted) return accepted;
+  }
+  if (!any && TEXT_STEPS.has(step)) return acceptProse(step as "senaryo" | "metin" | "kanca", text);
+  return null;
+}
+
+export function stepRetryHint(
+  step: StepName,
+  text: string,
+  ctx: { konu?: string; anlatim?: string; benzer?: string } = {},
+) {
+  const record = asRecord(readModelAny(text));
+  if (record && (step === "gorsel" || step === "video")) return mediaPromptProblem(step, record, ctx) || "Sadece JSON döndür.";
+  if (record && step === "altsahne") {
+    return (
+      mediaPromptProblem("gorsel", { prompt: record.image_prompt ?? record.prompt, konu_ozeti: record.konu_ozeti }, ctx) ||
+      "Sadece JSON döndür."
+    );
+  }
+  return "Sadece JSON döndür.";
 }
 
 function repairJson(slice: string) {
@@ -215,23 +337,6 @@ export type Idea = {
   kaynak_arama: string;
   seri_olur_mu: boolean;
 };
-
-export function readModelAny(text: string): unknown {
-  const object = readModelJson(text);
-  const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(text);
-  const source = fenced?.[1] ?? text;
-  const start = source.indexOf("[");
-  const end = source.lastIndexOf("]");
-  if (start >= 0 && end > start) {
-    try {
-      const list = JSON.parse(source.slice(start, end + 1)) as unknown;
-      if (Array.isArray(list)) return list;
-    } catch {
-      /* nesne duruyor */
-    }
-  }
-  return object;
-}
 
 export function acceptIdeas(raw: unknown): Idea[] | null {
   const row = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : null;

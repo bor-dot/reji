@@ -4,6 +4,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { SESLE_SELECTORS, SESLE_URL } from "./sesle-selectors";
+import { trackJob } from "./ai-runtime";
 
 export type SesleChunk = {
   index: number;
@@ -52,7 +53,8 @@ async function loadPlaywright() {
       chromium: { launchPersistentContext: (dir: string, opts: object) => Promise<Context> };
     }>;
     return await loader();
-  } catch {
+  } catch (error) {
+    console.warn("Playwright yok.", error);
     return null;
   }
 }
@@ -117,6 +119,11 @@ async function runJob(job: SesleJob, input: { folder: string; voice: string; spe
     viewport: { width: 1280, height: 900 },
     acceptDownloads: true,
   });
+  const release = trackJob(() => {
+    job.status = "hata";
+    job.note = "Durduruldu.";
+    void context.close().catch((error) => console.warn("Sesle penceresi kapanmadı.", error));
+  });
   try {
     const page = context.pages()[0] ?? (await context.newPage());
     await page.goto(SESLE_URL, { waitUntil: "domcontentloaded", timeout: 45_000 });
@@ -145,7 +152,10 @@ async function runJob(job: SesleJob, input: { folder: string; voice: string; spe
           field.dispatchEvent(new Event("input", { bubbles: true }));
         }, input.speed);
       }
-      const downloadWait = page.waitForEvent("download", { timeout: 90_000 }).catch(() => null);
+      const downloadWait = page.waitForEvent("download", { timeout: 90_000 }).catch((error) => {
+        console.warn("Sesle indirmesi gelmedi.", error);
+        return null;
+      });
       if (!(await clickNamed(page, SESLE_SELECTORS.generateNames))) {
         chunk.status = "hata";
         chunk.detail = "Seslendir düğmesi yok.";
@@ -175,6 +185,7 @@ async function runJob(job: SesleJob, input: { folder: string; voice: string; spe
     job.status = job.chunks.some((chunk) => chunk.status === "hata") ? "hata" : "bitti";
     job.note = job.status === "bitti" ? "Sesle bitti." : "Bazı parçalar yazılamadı.";
   } finally {
-    await context.close().catch(() => undefined);
+    release();
+    await context.close().catch((error) => console.warn("Sesle penceresi kapanmadı.", error));
   }
 }

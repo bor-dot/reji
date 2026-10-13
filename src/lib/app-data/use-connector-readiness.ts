@@ -76,7 +76,8 @@ export function useRefetchWhenConnectorReady(
       refetching = true;
       try {
         await refetchRef.current();
-      } catch {
+      } catch (error) {
+      console.warn(error);
         // The query owns its own error state; a failed refetch must not stop
         // the probe loop.
       } finally {

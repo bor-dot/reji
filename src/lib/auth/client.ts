@@ -52,7 +52,8 @@ export function getBearerToken(): string | null {
   if (typeof window === "undefined") return null;
   try {
     return window.sessionStorage.getItem(BEARER_KEY);
-  } catch {
+  } catch (error) {
+      console.warn(error);
     return null;
   }
 }
@@ -62,7 +63,8 @@ function setBearerToken(token: string | null): void {
   try {
     if (token) window.sessionStorage.setItem(BEARER_KEY, token);
     else window.sessionStorage.removeItem(BEARER_KEY);
-  } catch {
+  } catch (error) {
+      console.warn(error);
     /* storage unavailable — ignore */
   }
 }
@@ -130,7 +132,8 @@ export async function signIn(
     // reload was the slow "still loading after the popup closed" feeling.
     try {
       await authClient.getSession();
-    } catch {
+    } catch (error) {
+      console.warn(error);
       /* session store will recover on next useSession fetch */
     }
     if (typeof window !== "undefined") {

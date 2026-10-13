@@ -216,8 +216,9 @@ export function Desk() {
         keys: Array.isArray(data.keys) ? data.keys : keys,
       });
       notify("İçe aktarıldı. Anahtarlar şifreli paketse aynı sunucuda açılır.");
-    } catch {
-      notify("JSON okunamadı.");
+    } catch (error) {
+      console.warn(error);
+      notify(error instanceof Error ? error.message : "JSON okunamadı.");
     }
   }
 

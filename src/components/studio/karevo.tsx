@@ -74,8 +74,9 @@ export function KarevoSend({ project, channelName }: { project: Project; channel
       }
       setPath(res.path);
       notify("Karevo paketi yazıldı.");
-    } catch {
-      notify("Karevo paketi yazılamadı.");
+    } catch (error) {
+      console.warn(error);
+      notify(error instanceof Error ? error.message : "Karevo paketi yazılamadı.");
     } finally {
       setBusy(false);
     }

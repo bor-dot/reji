@@ -156,7 +156,9 @@ async function createPgliteSql(): Promise<Sql> {
     }
   };
   const pass = (globalRef.__pgliteMigrateChain__ ?? Promise.resolve())
-    .catch(() => undefined) // an earlier failed pass must not wedge the chain
+    .catch((error) => {
+      console.warn("Önceki taşıma geçmedi.", error);
+    })
     .then(migrate);
   globalRef.__pgliteMigrateChain__ = pass;
   await pass;

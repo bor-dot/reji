@@ -80,7 +80,8 @@ async function pull(url: string, max: number): Promise<{ bytes: Buffer; type: st
     const bytes = Buffer.from(await res.arrayBuffer());
     if (bytes.length < 16 || bytes.length > max) return { error: "dosya okunamadı" };
     return { bytes, type };
-  } catch {
+  } catch (error) {
+      console.warn(error);
     return { error: "indirilemedi" };
   }
 }
@@ -112,7 +113,8 @@ export async function sendKarevo(input: {
     let audio: Buffer | null = null;
     try {
       audio = Buffer.from(scene.audioBase64, "base64");
-    } catch {
+    } catch (error) {
+      console.warn(error);
       audio = null;
     }
     if (!audio || audio.length < 32 || audio.length > MAX_AUDIO) problems.push("ses yok");

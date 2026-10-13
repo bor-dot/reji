@@ -56,7 +56,8 @@ export function isSafeBridgePath(path: string): boolean {
   try {
     const resolved = new URL(path, "https://preview.invalid");
     return resolved.origin === "https://preview.invalid";
-  } catch {
+  } catch (error) {
+      console.warn(error);
     return false;
   }
 }
@@ -119,7 +120,8 @@ export function installPreviewHostBridge(
           : { [ROOT_STATE_KEY]: isRoot };
       originalReplaceState(marked, "", window.location.href);
     }
-  } catch {
+  } catch (error) {
+      console.warn(error);
     // ignore if the document cannot be marked
   }
 
@@ -156,7 +158,8 @@ export function installPreviewHostBridge(
       const next = `${url.pathname}${url.search}${url.hash}`;
       window.history.pushState(window.history.state, "", next);
       window.dispatchEvent(new PopStateEvent("popstate", { state: window.history.state }));
-    } catch {
+    } catch (error) {
+      console.warn(error);
       // ignore malformed paths
     }
   };

@@ -54,12 +54,12 @@ const VIDEO_MODELS = [
 ];
 
 const WRITERS = [
-  ["api", "API"],
-  ["cli", "CLI (otomatik)"],
+  ["cli", "Grok, Codex, Claude, Gemini, sonra API"],
+  ["grok", "Grok CLI"],
   ["codex", "Codex"],
-  ["grok", "Grok"],
   ["claude", "Claude"],
   ["gemini", "Gemini"],
+  ["api", "CLI yoksa API"],
 ];
 
 const STATUS_LABEL = {
@@ -85,7 +85,10 @@ export function Settings() {
     asked.current = true;
     void link()
       .then(setGrok)
-      .catch(() => setGrok(null));
+      .catch((error) => {
+        console.warn(error);
+        setGrok(null);
+      });
   }, [link]);
 
   async function save(provider: ProviderId) {
@@ -99,8 +102,9 @@ export function Settings() {
         setDrafts((prev) => ({ ...prev, [provider]: "" }));
         notify("Anahtar şifrelenip saklandı. Düz metin tarayıcıda durmuyor.");
       }
-    } catch {
-      notify("Anahtar saklanamadı.");
+    } catch (error) {
+      console.warn(error);
+      notify(error instanceof Error ? error.message : "Anahtar saklanamadı.");
     } finally {
       setBusy("");
     }
@@ -117,8 +121,9 @@ export function Settings() {
         },
       });
       notify(res.ok ? res.text : res.error);
-    } catch {
-      notify("Test tamamlanamadı.");
+    } catch (error) {
+      console.warn(error);
+      notify(error instanceof Error ? error.message : "Test tamamlanamadı.");
     } finally {
       setBusy("");
     }
@@ -129,8 +134,9 @@ export function Settings() {
     try {
       const res = await probe();
       setClis(res);
-    } catch {
-      notify("CLI yoklanamadı.");
+    } catch (error) {
+      console.warn(error);
+      notify(error instanceof Error ? error.message : "CLI yoklanamadı.");
     } finally {
       setBusy("");
     }
@@ -192,8 +198,7 @@ export function Settings() {
           }}
         />
         <p className="text-sm text-faint">
-          Varsayılan yol Grok: metin API, görsel Imagine, video Imagine, ses Grok. Kota dolunca yedek API ya da
-          sahneye bırakılan dosya. CLI seçilirse metin oradan yazılır, görsel yine Imagine’da kalır.
+          Sıra: Grok CLI, Codex, Claude, Gemini, en son API. Seçili bir CLI varsa o öne alınır, yine de sıra bozulmaz.
         </p>
       </section>
 
@@ -280,8 +285,8 @@ export function Settings() {
           </Button>
         </div>
         <p className="text-sm text-muted">
-          Yoklama uygulamanın çalıştığı makinededir. Önizleme sunucusu senin Mac’in değil; orada kurulu olmayan
-          araç “Kurulu değil” görünür. Sahte “Bağlı” yazılmaz.
+          Metin sırası: 1 Grok CLI, 2 Codex, 3 Claude, 4 Gemini, 5 API. Yoklama uygulamanın çalıştığı makinededir.
+          Önizleme sunucusu senin Mac’in değil; orada kurulu olmayan araç “Kurulu değil” görünür.
         </p>
         {clis ? (
           <ul className="flex flex-col gap-3">

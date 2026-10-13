@@ -75,7 +75,10 @@ export async function handleAuthPopupRequest(request: Request): Promise<Response
     });
 
     if (!apiRes.ok) {
-      const detail = await apiRes.text().catch(() => "");
+      const detail = await apiRes.text().catch((error) => {
+        console.warn(error);
+        return "";
+      });
       return completionResponse({
         source: "grok-auth-popup",
         token: null,
@@ -83,7 +86,10 @@ export async function handleAuthPopupRequest(request: Request): Promise<Response
       });
     }
 
-    const body = (await apiRes.json().catch(() => null)) as {
+    const body = (await apiRes.json().catch((error) => {
+      console.warn(error);
+      return null;
+    })) as {
       url?: string;
     } | null;
     const location = body?.url;
@@ -146,11 +152,11 @@ function completionHtml(message: PopupMessage): string {
 (function () {
   var el = document.getElementById("grok-auth-popup-msg");
   var msg = { source: "grok-auth-popup", token: null };
-  try { if (el && el.textContent) msg = JSON.parse(el.textContent); } catch (e) {}
+  try { if (el && el.textContent) msg = JSON.parse(el.textContent); } catch (e) { console.warn(e); }
   try {
     if (window.opener) window.opener.postMessage(msg, window.location.origin);
-  } catch (e) {}
-  try { window.close(); } catch (e) {}
+  } catch (e) { console.warn(e); }
+  try { window.close(); } catch (e) { console.warn(e); }
 })();
 </script>
 </body>
@@ -170,7 +176,8 @@ function readCookie(request: Request, name: string): string | null {
     const raw = trimmed.slice(eq + 1);
     try {
       return decodeURIComponent(raw);
-    } catch {
+    } catch (error) {
+      console.warn(error);
       return raw;
     }
   }

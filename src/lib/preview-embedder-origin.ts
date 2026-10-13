@@ -6,7 +6,8 @@ export function isGrokEmbedderOrigin(origin: string): boolean {
     if (host === "grok.com" || host.endsWith(".grok.com")) return true;
     if (host === "localhost" || host === "127.0.0.1" || host === "[::1]") return true;
     return false;
-  } catch {
+  } catch (error) {
+      console.warn(error);
     return false;
   }
 }
@@ -48,7 +49,8 @@ export function resolveParentEmbedderOrigin(
       ) {
         return url.origin;
       }
-    } catch {
+    } catch (error) {
+      console.warn(error);
       // try next candidate
     }
   }

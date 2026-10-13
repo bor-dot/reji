@@ -1,5 +1,5 @@
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
-import { execFile } from "node:child_process";
+import { execFile, type ChildProcess } from "node:child_process";
 import { constants } from "node:fs";
 import { access } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -89,41 +89,84 @@ function fault(error: unknown, fallback: string) {
   return message || fallback;
 }
 
-export async function completeText(input: {
+const jobs = new Set<{ kill: () => void }>();
+let wave = 0;
+
+export function trackJob(kill: () => void) {
+  const job = {
+    kill() {
+      try {
+        kill();
+      } catch (error) {
+        console.warn("İş durdurulamadı.", error);
+      }
+    },
+  };
+  jobs.add(job);
+  return () => jobs.delete(job);
+}
+
+export function currentWave() {
+  return wave;
+}
+
+export function stopTrackedJobs() {
+  wave += 1;
+  const count = jobs.size;
+  for (const job of jobs) job.kill();
+  jobs.clear();
+  return count;
+}
+
+function openCall(ms: number) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  let stopped = false;
+  const release = trackJob(() => {
+    stopped = true;
+    ctrl.abort();
+  });
+  return {
+    signal: ctrl.signal,
+    stopped: () => stopped,
+    close() {
+      clearTimeout(timer);
+      release();
+    },
+  };
+}
+
+export function cliOrder(): Array<"grok" | "codex" | "claude" | "gemini"> {
+  return ["grok", "codex", "claude", "gemini"];
+}
+
+export function textOrder(writer?: string): Array<"grok" | "codex" | "claude" | "gemini" | "api"> {
+  const clis = cliOrder();
+  const preferred = clis.find((id) => id === writer);
+  const chain = preferred ? [preferred, ...clis.filter((id) => id !== preferred)] : [...clis];
+  return [...chain, "api"];
+}
+
+async function completeViaApi(input: {
   model: string;
   system: string;
   user: string;
   sealed?: { iv: string; ciphertext: string };
   maxTokens?: number;
   json?: boolean;
-}) {
-  const prompt = `${input.system}\n\n${input.user}`;
-  const cliErrors: string[] = [];
-  try {
-    const probe = await probeClis();
-    const ready = new Set(probe.items.filter((row) => row.status === "bagli").map((row) => row.id));
-    for (const id of ["grok", "codex", "claude", "gemini"] as const) {
-      if (!ready.has(id)) continue;
-      const written = await runCliText(id, prompt);
-      if (written.ok && written.text.trim()) return { ok: true as const, text: written.text, via: sourceLabel(id) };
-      if (!written.ok) cliErrors.push(written.error);
-    }
-  } catch (error) {
-    cliErrors.push(fault(error, "CLI yazamadı."));
-  }
+}): Promise<{ ok: true; text: string } | { ok: false; error: string; stopped: boolean }> {
   const model = TEXT_MODELS[input.model] ? input.model : "grok-4.5";
   const provider = TEXT_MODELS[model];
   const key = resolveKey(provider, input.sealed);
-  if (!key) {
-    return { ok: false as const, error: cliErrors[0] || "Bu model için kayıtlı anahtar yok." };
-  }
+  if (!key) return { ok: false, error: "Bu model için kayıtlı anahtar yok.", stopped: false };
+  const call = openCall(150_000);
   try {
     if (provider === "xai" || provider === "openai") {
       const url =
         provider === "xai" ? "https://api.x.ai/v1/chat/completions" : "https://api.openai.com/v1/chat/completions";
       const res = await fetch(url, {
         method: "POST",
-        signal: AbortSignal.timeout(150_000),
+        signal: call.signal,
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
         body: JSON.stringify({
           model,
@@ -136,13 +179,14 @@ export async function completeText(input: {
           ],
         }),
       });
-      if (!res.ok) return { ok: false as const, error: clipError(res.status, await res.text()) };
+      if (!res.ok) return { ok: false, error: clipError(res.status, await res.text()), stopped: false };
       const body = (await res.json()) as { choices?: { message?: { content?: string } }[] };
-      return { ok: true as const, text: body.choices?.[0]?.message?.content ?? "" };
+      return { ok: true, text: body.choices?.[0]?.message?.content ?? "" };
     }
     if (provider === "anthropic") {
       const res = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
+        signal: call.signal,
         headers: {
           "Content-Type": "application/json",
           "x-api-key": key,
@@ -155,14 +199,15 @@ export async function completeText(input: {
           messages: [{ role: "user", content: input.user }],
         }),
       });
-      if (!res.ok) return { ok: false as const, error: clipError(res.status, await res.text()) };
+      if (!res.ok) return { ok: false, error: clipError(res.status, await res.text()), stopped: false };
       const body = (await res.json()) as { content?: { text?: string }[] };
-      return { ok: true as const, text: body.content?.map((part) => part.text ?? "").join("") ?? "" };
+      return { ok: true, text: body.content?.map((part) => part.text ?? "").join("") ?? "" };
     }
     const res = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
       {
         method: "POST",
+        signal: call.signal,
         headers: { "Content-Type": "application/json", "x-goog-api-key": key },
         body: JSON.stringify({
           contents: [{ parts: [{ text: `${input.system}\n\n${input.user}` }] }],
@@ -170,14 +215,54 @@ export async function completeText(input: {
         }),
       },
     );
-    if (!res.ok) return { ok: false as const, error: clipError(res.status, await res.text()) };
+    if (!res.ok) return { ok: false, error: clipError(res.status, await res.text()), stopped: false };
     const body = (await res.json()) as { candidates?: { content?: { parts?: { text?: string }[] } }[] };
     const text = body.candidates?.[0]?.content?.parts?.map((part) => part.text ?? "").join("") ?? "";
-    return { ok: true as const, text };
+    return { ok: true, text };
   } catch (error) {
-    if (error instanceof Error && error.name === "TimeoutError") return { ok: false as const, error: "Süre doldu. Yine Devam et." };
-    return { ok: false as const, error: fault(error, "Bağlantı koptu.") };
+    if (call.stopped()) return { ok: false, error: "Durduruldu.", stopped: true };
+    if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {
+      return { ok: false, error: "Süre doldu. Yine Devam et.", stopped: false };
+    }
+    return { ok: false, error: fault(error, "Bağlantı koptu."), stopped: false };
+  } finally {
+    call.close();
   }
+}
+
+export async function completeText(input: {
+  model: string;
+  system: string;
+  user: string;
+  sealed?: { iv: string; ciphertext: string };
+  maxTokens?: number;
+  json?: boolean;
+  writer?: string;
+}) {
+  const prompt = `${input.system}\n\n${input.user}`;
+  const errors: string[] = [];
+  let ready = new Set<string>();
+  try {
+    const probe = await probeClis();
+    ready = new Set(probe.items.filter((row) => row.status === "bagli").map((row) => row.id));
+  } catch (error) {
+    errors.push(fault(error, "CLI yazamadı."));
+  }
+  for (const id of textOrder(input.writer)) {
+    if (id === "api") {
+      const api = await completeViaApi(input);
+      if (api.ok) return { ok: true as const, text: api.text, via: "API" };
+      if (api.stopped) return { ok: false as const, error: api.error, stopped: true as const };
+      errors.push(api.error);
+      continue;
+    }
+    if (!ready.has(id)) continue;
+    const written = await runCliText(id, prompt);
+    if (written.ok && written.text.trim()) return { ok: true as const, text: written.text, via: sourceLabel(id) };
+    if (!written.ok && written.stopped) return { ok: false as const, error: written.error, stopped: true as const };
+    if (!written.ok) errors.push(written.error);
+  }
+  return { ok: false as const, error: errors[0] || "Bu model için kayıtlı anahtar yok.", stopped: false as const };
 }
 
 export async function testProvider(provider: ProviderId, sealed?: { iv: string; ciphertext: string }) {
@@ -305,9 +390,11 @@ export async function speakText(input: {
   const voice = SPEAK_VOICES[input.voiceId] ?? "eve";
   const speed = Math.min(1.5, Math.max(0.7, Number(input.speed) || 1));
   const language = input.language === "en" ? "en" : "tr";
+  const call = openCall(150_000);
   try {
     const res = await fetch("https://api.x.ai/v1/tts", {
       method: "POST",
+      signal: call.signal,
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
       body: JSON.stringify({
         text,
@@ -346,7 +433,10 @@ export async function speakText(input: {
       words,
     };
   } catch (error) {
+    if (call.stopped()) return { ok: false as const, error: "Durduruldu." };
     return { ok: false as const, error: fault(error, "Ses isteği koptu.") };
+  } finally {
+    call.close();
   }
 }
 
@@ -586,7 +676,7 @@ export async function pollVeo(name: string, sealed?: { iv: string; ciphertext: s
 
 export type CliId = CliProbe["id"];
 
-const CLI_FALLBACK: CliId[] = ["codex", "grok", "claude", "gemini"];
+const CLI_FALLBACK: CliId[] = cliOrder();
 
 export function sourceLabel(id: "api" | CliId): string {
   if (id === "api") return "API";
@@ -601,18 +691,17 @@ export async function chooseTextRoute(input: {
   model: string;
   sealed?: { iv: string; ciphertext: string };
 }): Promise<{ ok: true; via: "api" | CliId; label: string } | { ok: false; error: string }> {
-  const specific = CLI_FALLBACK.includes(input.writer as CliId) ? (input.writer as CliId) : null;
-  const provider = TEXT_MODELS[input.model] ?? "xai";
-  const hasKey = Boolean(resolveKey(provider, input.sealed));
-  if (input.writer !== "cli" && !specific && hasKey) return { ok: true, via: "api", label: "API" };
   const probe = await probeClis();
   const bagli = new Set(probe.items.filter((row) => row.status === "bagli").map((row) => row.id));
-  const order: CliId[] = [];
-  if (specific) order.push(specific);
-  for (const id of CLI_FALLBACK) if (!order.includes(id)) order.push(id);
-  const via = order.find((id) => bagli.has(id));
-  if (!via) return { ok: false, error: "Bağlı CLI yok. Ayarlar'dan giriş yap ya da API anahtarı ekle." };
-  return { ok: true, via, label: sourceLabel(via) };
+  for (const id of textOrder(input.writer)) {
+    if (id === "api") {
+      const provider = TEXT_MODELS[input.model] ?? "xai";
+      if (resolveKey(provider, input.sealed) || resolveKey("xai", input.sealed)) return { ok: true, via: "api", label: "API" };
+      return { ok: false, error: "Bağlı CLI yok ve API anahtarı da yok." };
+    }
+    if (bagli.has(id)) return { ok: true, via: id, label: sourceLabel(id) };
+  }
+  return { ok: false, error: "Bağlı CLI yok ve API anahtarı da yok." };
 }
 
 export async function chooseProduceText(input: {
@@ -621,7 +710,7 @@ export async function chooseProduceText(input: {
 }): Promise<{ ok: true; via: "api" | CliId; label: string; model: string } | { ok: false; error: string }> {
   const probe = await probeClis({ fresh: true });
   const bagli = new Set(probe.items.filter((row) => row.status === "bagli").map((row) => row.id));
-  for (const id of ["grok", "codex", "claude", "gemini"] as const) {
+  for (const id of CLI_FALLBACK) {
     if (bagli.has(id)) return { ok: true, via: id, label: sourceLabel(id), model: input.model };
   }
   const provider = TEXT_MODELS[input.model] ?? "xai";
@@ -631,35 +720,38 @@ export async function chooseProduceText(input: {
 }
 
 export async function runCliText(cli: CliId, prompt: string) {
-  if (!CLI_FALLBACK.includes(cli)) return { ok: false as const, error: "CLI yok." };
+  if (!CLI_FALLBACK.includes(cli)) return { ok: false as const, error: "CLI yok.", stopped: false };
   const bin = await findBin(cli);
-  if (!bin) return { ok: false as const, error: `${sourceLabel(cli)} kurulu değil.` };
+  if (!bin) return { ok: false as const, error: `${sourceLabel(cli)} kurulu değil.`, stopped: false };
   const args = cli === "codex" ? ["exec", "--skip-git-repo-check", prompt] : ["-p", prompt];
-  const result = await new Promise<{ code: number; stdout: string; stderr: string; timedOut: boolean }>((resolve) => {
-    execFile(
+  let stopped = false;
+  let child: ChildProcess | null = null;
+  const release = trackJob(() => {
+    stopped = true;
+    child?.kill("SIGKILL");
+  });
+  const result = await new Promise<{ stdout: string; stderr: string; timedOut: boolean }>((resolve) => {
+    child = execFile(
       bin,
       args,
       { timeout: 180_000, maxBuffer: 8_000_000, killSignal: "SIGKILL", env: cliEnv() },
       (error, stdout, stderr) => {
         const err = error as (NodeJS.ErrnoException & { killed?: boolean }) | null;
-        const timedOut = Boolean(err?.killed) || err?.code === "ETIMEDOUT";
-        const code = typeof err?.code === "number" ? err.code : err ? 1 : 0;
         resolve({
-          code,
           stdout: String(stdout ?? "").slice(0, 200_000),
           stderr: String(stderr ?? "").slice(0, 4_000),
-          timedOut,
+          timedOut: !stopped && (Boolean(err?.killed) || err?.code === "ETIMEDOUT"),
         });
       },
     );
-  });
-  if (result.timedOut) return { ok: false as const, error: `${sourceLabel(cli)} 180 sn içinde yanıt vermedi.` };
+  }).finally(release);
+  if (stopped) return { ok: false as const, error: "Durduruldu.", stopped: true };
+  if (result.timedOut) return { ok: false as const, error: `${sourceLabel(cli)} 180 sn içinde yanıt vermedi.`, stopped: false };
   const text = result.stdout.trim();
   const errText = result.stderr.trim();
-  if (text.includes("{") && text.length > 40) return { ok: true as const, text };
-  if (loggedOut(`${text}\n${errText}`)) return { ok: false as const, error: `${sourceLabel(cli)} giriş istiyor.` };
-  if (text) return { ok: true as const, text };
-  return { ok: false as const, error: `${sourceLabel(cli)} yanıt vermedi.` };
+  if (loggedOut(`${text}\n${errText}`)) return { ok: false as const, error: `${sourceLabel(cli)} giriş istiyor.`, stopped: false };
+  if (text) return { ok: true as const, text, stopped: false };
+  return { ok: false as const, error: errText.slice(0, 180) || `${sourceLabel(cli)} yanıt vermedi.`, stopped: false };
 }
 
 export async function completeWithCli(id: CliId, prompt: string) {

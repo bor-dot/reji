@@ -36,7 +36,7 @@ export const DEFAULT_MODELS: ModelPrefs = {
   image: "grok-imagine-image",
   video: "grok-imagine-video-1.5-lite",
   videoSize: "720p",
-  writer: "api",
+  writer: "cli",
 };
 
 function modelsOf(raw?: Partial<ModelPrefs>): ModelPrefs {
@@ -130,7 +130,8 @@ function load(): Saved | null {
     const projects = rows.map((item) => normalizeProject(item)).filter((item): item is Project => Boolean(item));
     if (!projects.length) return null;
     return { ...freshVault(), projects };
-  } catch {
+  } catch (error) {
+      console.warn(error);
     return null;
   }
 }
@@ -138,7 +139,8 @@ function load(): Saved | null {
 function persist(saved: Saved) {
   try {
     localStorage.setItem(STORAGE, JSON.stringify(saved));
-  } catch {
+  } catch (error) {
+      console.warn(error);
     /* quota — session still works */
   }
 }

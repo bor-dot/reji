@@ -3,6 +3,7 @@ import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { GROK_IMAGINE_SELECTORS, GROK_IMAGINE_URL } from "./selectors";
+import { trackJob } from "./ai-runtime";
 
 type Locator = {
   count: () => Promise<number>;
@@ -35,7 +36,8 @@ async function loadPlaywright() {
       chromium: { launchPersistentContext: (dir: string, opts: object) => Promise<Context> };
     }>;
     return await loader();
-  } catch {
+  } catch (error) {
+    console.warn("Playwright yok.", error);
     return null;
   }
 }
@@ -43,7 +45,7 @@ async function loadPlaywright() {
 async function clickNamed(page: Page, name: string) {
   const button = page.getByRole("button", { name }).first();
   if ((await button.count()) < 1) return false;
-  await button.click({ timeout: 8_000 }).catch(() => undefined);
+  await button.click({ timeout: 8_000 }).catch((error) => console.warn("Düğme tıklanamadı.", error));
   return true;
 }
 
@@ -65,17 +67,22 @@ export async function grokImagine(input: {
       viewport: { width: 1280, height: 900 },
       acceptDownloads: true,
     });
-  } catch {
-    if (!headed) return { ok: false, error: "Grok oturumu açılamadı." };
+  } catch (error) {
+    console.warn("Grok oturumu açılamadı.", error);
+    if (!headed) return { ok: false, error: error instanceof Error ? error.message : "Grok oturumu açılamadı." };
     try {
       context = await playwright.chromium.launchPersistentContext(profile, {
         headless: true,
         viewport: { width: 1280, height: 900 },
       });
-    } catch {
-      return { ok: false, error: "Grok penceresi açılamadı." };
+    } catch (again) {
+      console.warn("Grok penceresi açılamadı.", again);
+      return { ok: false, error: again instanceof Error ? again.message : "Grok penceresi açılamadı." };
     }
   }
+  const release = trackJob(() => {
+    void context.close().catch((error) => console.warn("Grok penceresi kapanmadı.", error));
+  });
   const deadline = Date.now() + input.timeoutMs;
   try {
     const page = context.pages()[0] ?? (await context.newPage());
@@ -94,9 +101,9 @@ export async function grokImagine(input: {
     await clickNamed(page, GROK_IMAGINE_SELECTORS.aspect);
     await page.waitForTimeout(400);
     const ratio = page.locator("button").filter({ hasText: input.aspect === "9:16" ? GROK_IMAGINE_SELECTORS.ratioTall : GROK_IMAGINE_SELECTORS.ratioWide }).first();
-    if ((await ratio.count()) > 0) await ratio.click({ timeout: 5_000 }).catch(() => undefined);
+    if ((await ratio.count()) > 0) await ratio.click({ timeout: 5_000 }).catch((error) => console.warn("Oran seçilemedi.", error));
     const before = new Set(await page.locator("img").evaluateAll((nodes) => nodes.map((node) => (node as HTMLImageElement).currentSrc || (node as HTMLImageElement).src)));
-    await composer.click({ timeout: 5_000 }).catch(() => undefined);
+    await composer.click({ timeout: 5_000 }).catch((error) => console.warn("Yazı alanı tıklanamadı.", error));
     await composer.fill(input.prompt.slice(0, 1800));
     const submitted = await clickNamed(page, GROK_IMAGINE_SELECTORS.submit);
     if (!submitted) await page.keyboard.press("Enter");
@@ -117,7 +124,10 @@ export async function grokImagine(input: {
               if (bytes.length > 1000) return { ok: true, url: `data:video/mp4;base64,${bytes.toString("base64")}`, source: "Grok Imagine" };
             }
           }
-          const shot = await video.screenshot().catch(() => null);
+          const shot = await video.screenshot().catch((error) => {
+            console.warn("Video karesi alınamadı.", error);
+            return null;
+          });
           if (shot && shot.length > 1000) return { ok: true, url: `data:image/png;base64,${shot.toString("base64")}`, source: "Grok Imagine" };
         }
       }
@@ -136,13 +146,19 @@ export async function grokImagine(input: {
           }
         }
       }
-      const shot = await page.locator("img").nth(Math.max(0, now.indexOf(fresh))).screenshot().catch(() => null);
+      const shot = await page.locator("img").nth(Math.max(0, now.indexOf(fresh))).screenshot().catch((error) => {
+        console.warn("Görsel karesi alınamadı.", error);
+        return null;
+      });
       if (shot && shot.length > 1000) return { ok: true, url: `data:image/png;base64,${shot.toString("base64")}`, source: "Grok Imagine" };
     }
     return { ok: false, error: input.kind === "video" ? "Grok video süresi doldu." : "Grok görsel süresi doldu." };
   } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message.slice(0, 160) : "Grok Imagine açılamadı." };
+    const message = error instanceof Error ? error.message : "Grok Imagine açılamadı.";
+    if (/closed|target closed|durdur/i.test(message)) return { ok: false, error: "Durduruldu." };
+    return { ok: false, error: message.slice(0, 160) };
   } finally {
-    await context.close().catch(() => undefined);
+    release();
+    await context.close().catch((error) => console.warn("Grok penceresi kapanmadı.", error));
   }
 }

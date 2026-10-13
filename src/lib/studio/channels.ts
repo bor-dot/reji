@@ -1,4 +1,4 @@
-import type { FormatId } from "./types";
+import type { FormatId } from "./types.ts";
 
 export type ChannelKind = "belgesel" | "mitoloji" | "kitap" | "cocuk" | "ozel";
 

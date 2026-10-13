@@ -1,5 +1,5 @@
-import type { Channel } from "./channels";
-import { DEFAULT_CHANNELS } from "./channels";
+import type { Channel } from "./channels.ts";
+import { DEFAULT_CHANNELS } from "./channels.ts";
 import type {
   Beat,
   Brief,
@@ -15,8 +15,8 @@ import type {
   Scene,
   Thumb,
   TitleOption,
-} from "./types";
-import { formatLabel } from "./types";
+} from "./types.ts";
+import { formatLabel } from "./types.ts";
 
 const SEED_AT = 1_760_220_000_000;
 

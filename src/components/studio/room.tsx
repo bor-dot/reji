@@ -937,8 +937,9 @@ function ThumbStage({
         onPatch({ thumb: { ...thumb, imageUrl: res.url } });
         notify("Kapak Imagine’dan geldi.");
       }
-    } catch {
-      notify("Kapak üretilemedi.");
+    } catch (error) {
+      console.warn(error);
+      notify(error instanceof Error ? error.message : "Kapak üretilemedi.");
     } finally {
       setBusy(false);
     }
@@ -1158,8 +1159,9 @@ function VisualStage({ project, channel }: { project: Project; channel: Channel 
     try {
       await navigator.clipboard.writeText(text);
       notify("Kopyalandı.");
-    } catch {
-      notify("Kopyalanamadı.");
+    } catch (error) {
+      console.warn(error);
+      notify(error instanceof Error ? error.message : "Kopyalanamadı.");
     }
   }
 
@@ -1264,6 +1266,12 @@ function VisualStage({ project, channel }: { project: Project; channel: Channel 
             </Button>
             <Button variant="line" onClick={() => void copyPrompt(scene.videoPrompt)}>
               Flow için kopyala
+            </Button>
+            <Button variant="line" disabled={Boolean(busy)} onClick={() => void onImage(scene)}>
+              Görseli tekrar dene
+            </Button>
+            <Button variant="line" disabled={Boolean(busy)} onClick={() => void onVideo(scene)}>
+              Videoyu tekrar dene
             </Button>
             <Button
               variant="line"

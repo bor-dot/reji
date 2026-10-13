@@ -51,7 +51,8 @@ function connectorsBaseFor(publicHost: string | null): string | null {
 function tryGetRequest(): Request | null {
   try {
     return getRequest() ?? null;
-  } catch {
+  } catch (error) {
+      console.warn(error);
     return null;
   }
 }
@@ -158,7 +159,8 @@ async function gatePost(
   if (text) {
     try {
       json = JSON.parse(text) as GateJson;
-    } catch {
+    } catch (error) {
+      console.warn(error);
       json = {
         ok: false,
         errorMessage: `gate non-JSON response (HTTP ${res.status}): ${text.slice(0, 200)}`,
@@ -185,7 +187,8 @@ function gateSigninUrl(ctx: InboundContext): string | undefined {
     return gated
       ? `${signin}?return_to=${encodeURIComponent(gated)}`
       : signin;
-  } catch {
+  } catch (error) {
+      console.warn(error);
     return undefined;
   }
 }
@@ -251,6 +254,7 @@ function crossSiteBlockedResult(): CallToolResult | null {
     if (e instanceof CrossSiteRequestError) {
       return { ok: false, data: null, errorMessage: e.message };
     }
+    console.warn(e);
     return null;
   }
 }
@@ -278,7 +282,7 @@ function tokenIdentityKey(token: string): string {
             .digest("base64url");
         }
       }
-    } catch {}
+    } catch (error) { console.warn(error); }
   }
   return createHash("sha256").update(token).digest("base64url");
 }
@@ -314,7 +318,8 @@ export function failureMemoSize(): number {
 function safeMemoKey(parts: unknown[]): string | null {
   try {
     return JSON.stringify(parts);
-  } catch {
+  } catch (error) {
+      console.warn(error);
     return null;
   }
 }

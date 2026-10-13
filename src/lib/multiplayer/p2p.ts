@@ -119,7 +119,8 @@ export class P2PRoom {
   async join(): Promise<void> {
     try {
       await this.pollOnce();
-    } catch {
+    } catch (error) {
+      console.warn(error);
       // First poll can fail transiently; the scheduled loop below retries.
     }
     if (this.closed) return;
@@ -143,7 +144,7 @@ export class P2PRoom {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ op: "leave", room: this.opts.room, peer: this.opts.selfId }),
       keepalive: true,
-    }).catch(() => {});
+    }).catch((error) => console.warn(error));
   }
 
   /** Send on the unreliable game-state channel (drops stale packets). */
@@ -214,7 +215,8 @@ export class P2PRoom {
     if (this.closed) return;
     try {
       await this.pollOnce();
-    } catch {
+    } catch (error) {
+      console.warn(error);
       // Transient poll failures are expected (tab sleep, deploy roll); retry.
     }
     this.schedulePoll(this.anyPairConnecting() ? FAST_POLL_MS : IDLE_POLL_MS);
@@ -293,7 +295,8 @@ export class P2PRoom {
         slot.makingOffer = true;
         await pc.setLocalDescription();
         await this.sendSignal(peerId, "offer", pc.localDescription!.toJSON());
-      } catch {
+      } catch (error) {
+      console.warn(error);
         // A failed offer is retried on the next negotiationneeded.
       } finally {
         slot.makingOffer = false;
@@ -322,7 +325,8 @@ export class P2PRoom {
       let msg: { t: string; d?: unknown };
       try {
         msg = JSON.parse(e.data as string) as { t: string; d?: unknown };
-      } catch {
+      } catch (error) {
+      console.warn(error);
         return;
       }
       if (msg.t === "ping") {
@@ -424,7 +428,8 @@ export class P2PRoom {
           if (!slot.ignoreOffer) console.warn("[p2p] addIceCandidate failed:", err);
         }
       }
-    } catch {
+    } catch (error) {
+      console.warn(error);
       // Negotiation errors resolve on the next offer cycle; state is visible
       // to the app via connectionState.
     }
@@ -439,7 +444,7 @@ export class P2PRoom {
     const next = prev.then(() => this.postSignal(to, kind, payload));
     this.signalQueues.set(
       to,
-      next.catch(() => {}),
+      next.catch((error) => console.warn(error)),
     );
     return next;
   }
@@ -551,7 +556,8 @@ export class P2PRoom {
         slot.info.candidateType = local?.candidateType ?? null;
         this.emitPeers();
       }
-    } catch {
+    } catch (error) {
+      console.warn(error);
       // getStats is best-effort diagnostics only.
     }
   }

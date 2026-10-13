@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServerFn } from "@tanstack/react-start";
 import { openExportFolder, writeShootFiles, type ShootFile } from "./karevo-write";
-import { acceptIdeas, acceptStep, mediaPromptProblem, promptFor, readModelAny, readModelJson, readSections, sectionCount, targetWords, type StepName } from "./prompts";
+import { acceptIdeas, promptFor, readModelAny, readSections, readStep, sectionCount, stepRetryHint, targetWords, type StepName } from "./prompts";
 import { writeProjectBytes } from "./project-files";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -34,9 +34,16 @@ async function levelAudio(base64: string) {
     const bytes = await readFile(ok ? out : raw);
     return bytes.toString("base64");
   } finally {
-    await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    await rm(dir, { recursive: true, force: true }).catch((error) => console.warn("Geçici ses klasörü silinemedi.", error));
   }
 }
+
+export const haltProduce = createServerFn({ method: "POST" })
+  .validator((input: unknown) => input)
+  .handler(async () => {
+    const { stopTrackedJobs } = await import("./ai-runtime");
+    return { ok: true as const, stopped: stopTrackedJobs() };
+  });
 
 export const planProduceText = createServerFn({ method: "POST" })
   .validator((input: unknown) => input)
@@ -59,9 +66,14 @@ export const produceMedia = createServerFn({ method: "POST" })
     if (prompt.length < 8) return { ok: false as const, error: "Prompt kısa.", copy: false };
     const xai = sealedOf(row?.xai);
     const gemini = sealedOf(row?.gemini);
-    const timeoutMs = kind === "video" ? 600_000 : 180_000;
     const { grokImagine } = await import("./grok-imagine-run");
+    const { currentWave } = await import("./ai-runtime");
+    const wave = currentWave();
+    const timeoutMs = kind === "video" ? 600_000 : 180_000;
     const web = await grokImagine({ prompt, kind, aspect, timeoutMs });
+    if (currentWave() !== wave || (!web.ok && /durdur/i.test(web.error))) {
+      return { ok: false as const, error: "Durduruldu.", copy: false };
+    }
     if (web.ok) return { ok: true as const, url: web.url, source: web.source };
     if (kind === "image") {
       const { imagineImage, geminiImage } = await import("./ai-runtime");
@@ -78,6 +90,7 @@ export const produceMedia = createServerFn({ method: "POST" })
     if (started.ok) {
       const until = Date.now() + 540_000;
       while (Date.now() < until) {
+        if (currentWave() !== wave) return { ok: false as const, error: "Durduruldu.", copy: false };
         await new Promise((resolve) => setTimeout(resolve, 5000));
         const status = await pollVideo(started.requestId, xai);
         if (!status.ok) return { ok: false as const, error: status.error, copy: true };
@@ -88,6 +101,7 @@ export const produceMedia = createServerFn({ method: "POST" })
     if (veo.ok) {
       const until = Date.now() + 240_000;
       while (Date.now() < until) {
+        if (currentWave() !== wave) return { ok: false as const, error: "Durduruldu.", copy: false };
         await new Promise((resolve) => setTimeout(resolve, 8000));
         const status = await pollVeo(veo.requestId, gemini);
         if (!status.ok) return { ok: false as const, error: status.error, copy: true };
@@ -107,10 +121,14 @@ export const produceVoice = createServerFn({ method: "POST" })
     const folder = typeof row?.folder === "string" ? row.folder.slice(0, 80) : "cekim";
     const voice = typeof row?.sesle === "string" ? row.sesle : "Ultra Epic";
     const { startSesle, sesleJob } = await import("./sesle-run");
+    const { currentWave } = await import("./ai-runtime");
+    const wave = currentWave();
     const started = await startSesle({ folder, voice, speed: 1, chunks: [text] });
+    if (currentWave() !== wave) return { ok: false as const, error: "Durduruldu." };
     if (started.ok) {
       const until = Date.now() + 150_000;
       while (Date.now() < until) {
+        if (currentWave() !== wave) return { ok: false as const, error: "Durduruldu." };
         await new Promise((resolve) => setTimeout(resolve, 2000));
         const job = sesleJob(started.jobId);
         const chunk = job?.chunks[0];
@@ -118,9 +136,11 @@ export const produceVoice = createServerFn({ method: "POST" })
           const path = await keepVoice(row, chunk.audioBase64);
           return { ok: true as const, audioBase64: chunk.audioBase64, source: "Sesle", duration: 0, path };
         }
+        if (job?.note === "Durduruldu." || currentWave() !== wave) return { ok: false as const, error: "Durduruldu." };
         if (job?.status === "hata" || chunk?.status === "hata") break;
       }
     }
+    if (currentWave() !== wave) return { ok: false as const, error: "Durduruldu." };
     const { speakText } = await import("./ai-runtime");
     const spoken = await speakText({
       text,
@@ -223,42 +243,40 @@ export const produceStep = createServerFn({ method: "POST" })
       kapak_stili: typeof row?.kapak === "string" ? row.kapak.slice(0, 400) : "",
       oran: row?.oran === "9:16" ? "9:16" : "16:9",
     };
-    const { chooseProduceText, completeText, runCliText } = await import("./ai-runtime");
-    const route = await chooseProduceText({
-      model: typeof row?.model === "string" ? row.model : "grok-4.5",
-      sealed: sealedOf(row?.sealed),
-    });
-    if (!route.ok) return route;
+    const { completeText } = await import("./ai-runtime");
+    const model = typeof row?.model === "string" ? row.model : "grok-4.5";
+    const sealed = sealedOf(row?.sealed);
     const prompt = promptFor(step, vars);
+    const prose = step === "senaryo" || step === "metin" || step === "kanca";
     const ask = async (extra: string) => {
-      const user = extra ? `${prompt}\n\n${extra}` : prompt;
-      const written =
-        route.via === "api"
-          ? await completeText({
-              model: route.model,
-              system: "Sadece istenen JSON nesnesini ver.",
-              user,
-              sealed: sealedOf(row?.sealed),
-              json: true,
-              maxTokens: step === "senaryo" || step === "metin" || step === "sahneler" ? 2800 : 1400,
-            })
-          : await runCliText(route.via, user);
-      return written.ok ? written.text : "";
+      const written = await completeText({
+        model,
+        system: prose && !extra ? "İstenen metni yaz. JSON varsa onu da kabul ederim." : "Sadece istenen JSON'u ver.",
+        user: extra ? `${prompt}\n\n${extra}` : prompt,
+        sealed,
+        json: !prose || Boolean(extra),
+        maxTokens: step === "senaryo" || step === "metin" || step === "sahneler" ? 2800 : 1400,
+        writer: "cli",
+      });
+      if (!written.ok) return { ok: false as const, error: written.error, stopped: Boolean(written.stopped) };
+      return { ok: true as const, text: written.text, label: written.via };
     };
-    let text = await ask("");
-    let parsed = text ? readModelJson(text) : null;
     const ctx = { konu: vars.konu, anlatim: vars.anlatim, benzer: typeof row?.benzer === "string" ? row.benzer.slice(0, 700) : "" };
-    let accepted = parsed ? acceptStep(step, parsed, ctx) : null;
+    let first = await ask("");
+    if (!first.ok && first.stopped) return { ok: false as const, error: "Durduruldu." };
+    let label = first.ok ? first.label : "API";
+    let text = first.ok ? first.text : "";
+    let accepted = text ? readStep(step, text, ctx) : null;
     if (!accepted) {
-      const why =
-        parsed && (step === "gorsel" || step === "video")
-          ? mediaPromptProblem(step, parsed, ctx)
-          : "Önceki yanıt bozuktu. Yalnızca şemadaki JSON'u ver, başka cümle yazma.";
-      text = await ask(why || "Önceki yanıt bozuktu. Yalnızca şemadaki JSON'u ver, başka cümle yazma.");
-      parsed = text ? readModelJson(text) : null;
-      accepted = parsed ? acceptStep(step, parsed, ctx) : null;
+      const again = await ask(text ? stepRetryHint(step, text, ctx) : "Sadece JSON döndür.");
+      if (!again.ok && again.stopped) return { ok: false as const, error: "Durduruldu." };
+      if (again.ok) {
+        text = again.text;
+        label = again.label;
+        accepted = readStep(step, text, ctx);
+      }
     }
-    if (!accepted) return { ok: false as const, error: "Bu adımın JSON'u okunamadı. Yine dene." };
+    if (!accepted) return { ok: false as const, error: first.ok ? "Bu adımın JSON'u okunamadı. Yine dene." : first.error };
     if (step === "senaryo" && accepted.bolumler && accepted.beats) {
       const goal = targetWords(minutes);
       let bolumler = accepted.bolumler;
@@ -266,19 +284,25 @@ export const produceStep = createServerFn({ method: "POST" })
       let guard = 0;
       while (words() < goal * 0.85 && guard < 3) {
         guard += 1;
-        const moreText = await ask(
+        const more = await ask(
           `Şu an ${words()} kelime var. Hedef ${goal}. Kalan bölümleri yaz, öncekileri tekrarlama. Yalnızca {"bolumler":[{"baslik":"","metin":""}]} ver. Metin yalnızca okunacak cümle olsun.`,
         );
-        const more = moreText ? readModelJson(moreText) : null;
-        const extra = more ? readSections(more, 1) : null;
-        if (!extra) break;
+        if (!more.ok) {
+          if (more.stopped) return { ok: false as const, error: "Durduruldu." };
+          break;
+        }
+        label = more.label;
+        const parsed = readModelAny(more.text);
+        const record = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
+        const added = record ? readSections(record, 1) : null;
+        if (!added) break;
         const seen = new Set(bolumler.map((item) => item.baslik));
-        bolumler = [...bolumler, ...extra.bolumler.filter((item) => !seen.has(item.baslik))];
+        bolumler = [...bolumler, ...added.bolumler.filter((item) => !seen.has(item.baslik))];
       }
-      const full = readSections({ bolumler }, 3);
+      const full = readSections({ bolumler }, Math.min(3, bolumler.length));
       if (full) accepted = { ...accepted, ...full };
     }
-    return { ok: true as const, label: route.label, step, ...accepted };
+    return { ok: true as const, label, step, ...accepted };
   });
 
 export const suggestIdeas = createServerFn({ method: "POST" })
@@ -297,34 +321,35 @@ export const suggestIdeas = createServerFn({ method: "POST" })
       kanal_aciklama: typeof row?.aciklama === "string" ? row.aciklama.slice(0, 400) : "",
       son_konular: typeof row?.konular === "string" && row.konular.trim() ? row.konular.slice(0, 1200) : "yok",
     };
-    const { chooseProduceText, completeText, runCliText } = await import("./ai-runtime");
-    const route = await chooseProduceText({
-      model: typeof row?.model === "string" ? row.model : "grok-4.5",
-      sealed: sealedOf(row?.sealed),
-    });
-    if (!route.ok) return route;
+    const { completeText } = await import("./ai-runtime");
     const prompt = promptFor("fikir", vars);
+    const model = typeof row?.model === "string" ? row.model : "grok-4.5";
+    const sealed = sealedOf(row?.sealed);
     const ask = async (extra: string) => {
-      const user = extra ? `${prompt}\n\n${extra}` : prompt;
-      const written =
-        route.via === "api"
-          ? await completeText({
-              model: route.model,
-              system: "Sadece istenen JSON dizisini ver.",
-              user,
-              sealed: sealedOf(row?.sealed),
-              json: false,
-              maxTokens: 1400,
-            })
-          : await runCliText(route.via, user);
-      return written.ok ? written.text : "";
+      const written = await completeText({
+        model,
+        system: "Sadece istenen JSON dizisini ver.",
+        user: extra ? `${prompt}\n\n${extra}` : prompt,
+        sealed,
+        json: false,
+        maxTokens: 1400,
+        writer: "cli",
+      });
+      if (!written.ok) return { ok: false as const, error: written.error, stopped: Boolean(written.stopped), text: "", label: "" };
+      return { ok: true as const, text: written.text, label: written.via, stopped: false };
     };
-    let text = await ask("");
-    let ideas = acceptIdeas(text ? readModelAny(text) : null);
+    let first = await ask("");
+    if (!first.ok && first.stopped) return { ok: false as const, error: "Durduruldu." };
+    let label = first.label || "API";
+    let ideas = acceptIdeas(first.text ? readModelAny(first.text) : null);
     if (!ideas || ideas.length < 5) {
-      text = await ask("Tam 5 fikir ver. Yalnızca JSON dizisi. Son konuları tekrarlama.");
-      ideas = acceptIdeas(text ? readModelAny(text) : null);
+      const again = await ask("Sadece JSON döndür. Tam 5 fikir ver.");
+      if (!again.ok && again.stopped) return { ok: false as const, error: "Durduruldu." };
+      if (again.ok) {
+        label = again.label;
+        ideas = acceptIdeas(readModelAny(again.text));
+      }
     }
-    if (!ideas) return { ok: false as const, error: "Fikirler okunamadı. Yine dene." };
-    return { ok: true as const, label: route.label, ideas };
+    if (!ideas) return { ok: false as const, error: first.ok ? "Fikirler okunamadı. Yine dene." : first.error || "Fikirler okunamadı. Yine dene." };
+    return { ok: true as const, label, ideas };
   });

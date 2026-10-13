@@ -44,7 +44,8 @@ async function defaultJwksFetch(url: string): Promise<GateJwks | null> {
     if (!res.ok) return null;
     const body = (await res.json()) as GateJwks;
     return Array.isArray(body?.keys) ? body : null;
-  } catch {
+  } catch (error) {
+      console.warn(error);
     return null;
   }
 }
@@ -115,7 +116,8 @@ export async function verifyGateIdentityToken(
       name: typeof payload.name === "string" ? payload.name : null,
       teamId: typeof payload.team_id === "string" ? payload.team_id : null,
     };
-  } catch {
+  } catch (error) {
+      console.warn(error);
     return null;
   }
 }

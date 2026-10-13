@@ -5,7 +5,7 @@ import { scenesFor, chaptersFromBeats } from "@/lib/studio/engine";
 import { exportFolderName } from "@/lib/studio/karevo";
 import { productionLook, voiceCast } from "@/lib/studio/look";
 import { narrationText, spreadNarration } from "@/lib/studio/narration";
-import { openShoot, produceMedia, produceStep, produceVoice, saveShoot } from "@/lib/studio/produce";
+import { haltProduce, openShoot, produceMedia, produceStep, produceVoice, saveShoot } from "@/lib/studio/produce";
 import { keepRemoteMedia } from "@/lib/studio/project-files";
 import { cleanSpeech } from "@/lib/studio/speech-clean";
 import { useStudio } from "@/lib/studio/store";
@@ -13,7 +13,7 @@ import { notify } from "@/lib/studio/toast";
 import type { Pack, Project } from "@/lib/studio/types";
 import { Button } from "./bits";
 
-type Status = "bekliyor" | "calisiyor" | "bitti" | "hata";
+type Status = "bekliyor" | "calisiyor" | "bitti" | "hata" | "durduruldu";
 
 type Row = {
   id: string;
@@ -44,6 +44,7 @@ const MARK: Record<Status, string> = {
   calisiyor: "⏳",
   bitti: "✓",
   hata: "✗",
+  durduruldu: "–",
 };
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
@@ -85,6 +86,7 @@ export function ProduceScreen({
   const save = useServerFn(saveShoot);
   const open = useServerFn(openShoot);
   const keep = useServerFn(keepRemoteMedia);
+  const stopJobs = useServerFn(haltProduce);
   const look = productionLook(channel);
   const cast = voiceCast(channel);
   const [cursor, setCursor] = useState(0);
@@ -154,9 +156,13 @@ export function ProduceScreen({
     };
   }
 
+  const pinned = useRef<StepId | null>(null);
+
   async function runStep() {
-    const mine = stop.current + 1;
     if (flying.current) return;
+    const step = pinned.current ?? STEPS[cursor][0];
+    pinned.current = null;
+    const mine = stop.current + 1;
     flying.current = true;
     stop.current = mine;
     const started = Date.now();
@@ -166,7 +172,7 @@ export function ProduceScreen({
     try {
       if (step === "baslik" || step === "kanca" || step === "senaryo") {
         const res = await withTimeout(stepCall({ data: { step, ...fields() } }), 180_000);
-        if (!fresh()) return;
+        if (!fresh()) { patch(step, { status: "durduruldu", detail: "Durduruldu.", ms: Date.now() - started }); return; }
         if (!res.ok) throw new Error(res.error);
         if (step === "baslik" && "titles" in res && res.titles) {
           const pick = "secilen" in res && typeof res.secilen === "number" ? res.secilen : 0;
@@ -232,7 +238,7 @@ export function ProduceScreen({
           }),
           180_000,
         );
-        if (!fresh()) return;
+        if (!fresh()) { patch(step, { status: "durduruldu", detail: "Durduruldu.", ms: Date.now() - started }); return; }
         if (!asked.ok) throw new Error(asked.error);
         if (!("prompt" in asked) || !asked.prompt || !("video_prompt" in asked) || !asked.video_prompt) throw new Error("Sahne promptu gelmedi.");
         const ozet = "konu_ozeti" in asked && asked.konu_ozeti ? asked.konu_ozeti : scene.title;
@@ -284,7 +290,7 @@ export function ProduceScreen({
             }),
             180_000,
           );
-          if (!fresh()) return;
+          if (!fresh()) { patch(step, { status: "durduruldu", detail: "Durduruldu.", ms: Date.now() - started }); return; }
           if (!asked.ok) throw new Error(asked.error);
           if (!("prompt" in asked) || !asked.prompt) throw new Error("Prompt gelmedi.");
           prompt = asked.prompt;
@@ -321,7 +327,7 @@ export function ProduceScreen({
           }),
           step === "video" ? 610_000 : 190_000,
         );
-        if (!fresh()) return;
+        if (!fresh()) { patch(step, { status: "durduruldu", detail: "Durduruldu.", ms: Date.now() - started }); return; }
         if (!res.ok) throw new Error(res.copy ? `${res.error} ${prompt}` : res.error);
         const stored = await keep({
           data: {
@@ -380,7 +386,7 @@ export function ProduceScreen({
           }),
           180_000,
         );
-        if (!fresh()) return;
+        if (!fresh()) { patch(step, { status: "durduruldu", detail: "Durduruldu.", ms: Date.now() - started }); return; }
         if (!res.ok) throw new Error(res.error);
         patchPack(project.id, {
           beats: pack.beats.map((item, index) =>
@@ -400,7 +406,7 @@ export function ProduceScreen({
       }
       if (step === "yayin") {
         const asked = await withTimeout(stepCall({ data: { step, ...fields() } }), 180_000);
-        if (!fresh()) return;
+        if (!fresh()) { patch(step, { status: "durduruldu", detail: "Durduruldu.", ms: Date.now() - started }); return; }
         if (!asked.ok) throw new Error(asked.error);
         if (!("aciklama" in asked) || !asked.aciklama) throw new Error("Açıklama gelmedi.");
         patchPack(project.id, {
@@ -416,7 +422,7 @@ export function ProduceScreen({
         return;
       }
       const checked = await withTimeout(stepCall({ data: { step: "kontrol", ...fields() } }), 180_000);
-      if (!fresh()) return;
+      if (!fresh()) { patch(step, { status: "durduruldu", detail: "Durduruldu.", ms: Date.now() - started }); return; }
       if (!checked.ok) throw new Error(checked.error);
       if (!("puan" in checked)) throw new Error("Puan gelmedi.");
       patch(step, {
@@ -427,13 +433,18 @@ export function ProduceScreen({
         detail: (checked.duzeltmeler ?? []).join(" "),
       });
     } catch (error) {
-      if (!fresh()) return;
+      if (!fresh()) {
+        patch(step, { status: "durduruldu", detail: "Durduruldu.", ms: Date.now() - started });
+        return;
+      }
       const message = error instanceof Error ? error.message : "Adım durdu.";
       patch(step, { status: "hata", ms: Date.now() - started, detail: message });
       notify(message);
     } finally {
-      flying.current = false;
-      if (fresh()) setBusy(false);
+      if (fresh()) {
+        flying.current = false;
+        setBusy(false);
+      }
     }
   }
 
@@ -469,12 +480,30 @@ export function ProduceScreen({
     }
   }
 
+  function retry(id: StepId) {
+    pinned.current = id;
+    setRows((prev) => prev.map((row) => (row.id === id ? { ...row, status: "bekliyor", detail: "" } : row)));
+    setCursor(STEPS.findIndex(([key]) => key === id));
+    void runRef.current();
+  }
+
+  function retryFailed() {
+    const failed = rows.find((row) => row.status === "hata" || row.status === "durduruldu");
+    if (!failed) return;
+    pinned.current = failed.id as StepId;
+    setRows((prev) =>
+      prev.map((row) => (row.status === "hata" || row.status === "durduruldu" ? { ...row, status: "bekliyor", detail: "" } : row)),
+    );
+    setCursor(STEPS.findIndex(([key]) => key === failed.id));
+    void runRef.current();
+  }
+
   const runRef = useRef(runStep);
   runRef.current = runStep;
   useEffect(() => {
     if (!auto || busy || flying.current) return;
     const row = rows.find((item) => item.id === step);
-    if (!row || row.status === "hata") return;
+    if (!row || row.status === "hata" || row.status === "durduruldu") return;
     if (row.status === "bitti") {
       if (cursor < STEPS.length - 1) setCursor(cursor + 1);
       return;
@@ -495,8 +524,24 @@ export function ProduceScreen({
             <p className="mt-1 text-sm text-muted">Grok tek adımı yazar. Başlık, kanca, senaryo, metin ayrı. Sonrakine sen geçersin.</p>
           </div>
           <div className="flex flex-wrap gap-2">
-            <Button variant="line" disabled={!busy} onClick={() => { stop.current += 1; setBusy(false); }}>
+            <Button
+              variant="line"
+              disabled={!busy}
+              onClick={() => {
+                stop.current += 1;
+                flying.current = false;
+                setBusy(false);
+                patch(step, { status: "durduruldu", detail: "Durduruldu." });
+                void stopJobs({ data: {} }).catch((error) => {
+                  console.warn(error);
+                  notify(error instanceof Error ? error.message : "Durdurulamadı.");
+                });
+              }}
+            >
               Durdur
+            </Button>
+            <Button variant="line" disabled={busy || !rows.some((row) => row.status === "hata" || row.status === "durduruldu")} onClick={retryFailed}>
+              Hatalıları tekrar dene
             </Button>
             <Button variant="line" disabled={busy} onClick={() => void writeFolder()}>
               Klasöre yaz
@@ -529,14 +574,18 @@ export function ProduceScreen({
           {STEPS.map(([id, label], index) => {
             const row = rows.find((item) => item.id === id);
             return (
-              <button
-                key={id}
-                type="button"
-                onClick={() => setCursor(index)}
-                className={`press h-11 shrink-0 rounded-full px-3 text-sm ${index === cursor ? "bg-paper text-ink" : "text-muted ring-1 ring-line"}`}
-              >
-                {row ? MARK[row.status] : "·"} {label}
-              </button>
+              <div key={id} className="flex shrink-0 items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => setCursor(index)}
+                  className={`press h-11 rounded-full px-3 text-sm ${index === cursor ? "bg-paper text-ink" : "text-muted ring-1 ring-line"}`}
+                >
+                  {row ? MARK[row.status] : "·"} {label}
+                </button>
+                <button type="button" className="press h-11 px-2 text-sm text-muted" disabled={busy} onClick={() => retry(id)}>
+                  Tekrar dene
+                </button>
+              </div>
             );
           })}
         </div>

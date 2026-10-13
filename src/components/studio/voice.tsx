@@ -124,7 +124,7 @@ function BeatVoices({ project, channel }: { project: Project; channel: Channel }
           {urls[index] ? <audio controls src={urls[index]} className="mt-3 w-full" /> : null}
           <p className="mt-2 text-sm text-faint">{beat.audioPath || "Henüz dosya yok."}</p>
           <Button className="mt-2" variant="line" disabled={busy === String(index)} onClick={() => void render(index)}>
-            {busy === String(index) ? "Seslendiriliyor…" : beat.audioPath ? "Yeniden üret" : "Bu bölümü seslendir"}
+            {busy === String(index) ? "Seslendiriliyor…" : "Tekrar dene"}
           </Button>
         </article>
       ))}
@@ -152,7 +152,8 @@ function loadPrefs() {
   try {
     const raw = localStorage.getItem(PREFS);
     return raw ? (JSON.parse(raw) as { voiceId?: string; speed?: number }) : null;
-  } catch {
+  } catch (error) {
+      console.warn(error);
     return null;
   }
 }
@@ -162,7 +163,8 @@ function loadHistory(): Take[] {
     const raw = localStorage.getItem(HISTORY);
     const rows = raw ? (JSON.parse(raw) as Take[]) : [];
     return Array.isArray(rows) ? rows.slice(0, 12) : [];
-  } catch {
+  } catch (error) {
+      console.warn(error);
     return [];
   }
 }
@@ -229,7 +231,10 @@ export function VoiceStage({ project, channel }: { project: Project; channel: Ch
     const node = audio.current;
     if (!clip || !node) return;
     node.currentTime = 0;
-    void node.play().catch(() => setPlaying(false));
+    void node.play().catch((error) => {
+      console.warn(error);
+      setPlaying(false);
+    });
   }, [clip]);
 
   useEffect(() => {
@@ -359,8 +364,9 @@ export function VoiceStage({ project, channel }: { project: Project; channel: Ch
         scenes: project.pack.scenes.map((item) => (item.id === scene.id ? { ...item, audioDuration: duration } : item)),
       });
       notify(`${String(index + 1).padStart(2, "0")} sahne sesi hazır.`);
-    } catch {
-      notify("Sahne sesi yazılamadı.");
+    } catch (error) {
+      console.warn(error);
+      notify(error instanceof Error ? error.message : "Sahne sesi yazılamadı.");
     } finally {
       setSceneBusy("");
     }
@@ -666,9 +672,10 @@ function SeslePanel({ project, channel }: { project: Project; channel: Channel }
         return;
       }
       setJobId(res.jobId);
-    } catch {
+    } catch (error) {
+      console.warn(error);
       setBusy(false);
-      notify("Sesle başlatılamadı.");
+      notify(error instanceof Error ? error.message : "Sesle başlatılamadı.");
     }
   }
 
@@ -691,11 +698,9 @@ function SeslePanel({ project, channel }: { project: Project; channel: Channel }
               <span className="min-w-0 text-sm text-fg">
                 {String(index + 1).padStart(2, "0")} · {row?.status ?? "bekliyor"} · {text.slice(0, 48)}
               </span>
-              {row?.status === "hata" ? (
-                <Button variant="line" disabled={busy} onClick={() => void run(index)}>
-                  Tekrar dene
-                </Button>
-              ) : null}
+              <Button variant="line" disabled={busy} onClick={() => void run(index)}>
+                Tekrar dene
+              </Button>
             </li>
           );
         })}

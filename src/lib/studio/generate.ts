@@ -1,6 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import type { Beat, Hook, Seo, Shot, ShotKind, Thumb, TitleOption } from "./types";
+import { readModelAny } from "./prompts";
 
 const BriefSchema = z.object({
   title: z.string().trim().min(2).max(120),
@@ -188,39 +189,9 @@ export function parseGeneratedPack(raw: unknown) {
 }
 
 function extractJson(text: string): unknown {
-  const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(text);
-  const candidates = fenced ? [fenced[1], text] : [text];
-  let last: unknown;
-  for (const candidate of candidates) {
-    const start = candidate.indexOf("{");
-    const end = candidate.lastIndexOf("}");
-    const slices = start >= 0 ? [candidate.slice(start), end > start ? candidate.slice(start, end + 1) : ""] : [];
-    for (const slice of slices) {
-      if (!slice) continue;
-      for (const attempt of [slice, repairJson(slice)]) {
-        if (!attempt) continue;
-        try {
-          return JSON.parse(attempt) as unknown;
-        } catch (error) {
-          last = error;
-        }
-      }
-    }
-  }
-  throw last instanceof Error ? last : new Error("JSON yok");
-}
-
-function repairJson(slice: string) {
-  let body = slice.replace(/,\s*"[^"\n]*"?\s*:?\s*"?(?:[^"\\]|\\.)*$/s, "");
-  body = body.replace(/,\s*\{[^}]*$/s, "");
-  body = body.replace(/,\s*$/s, "");
-  const quotes = body.match(/(?<!\\)"/g)?.length ?? 0;
-  if (quotes % 2 === 1) body += '"';
-  const curly = (body.match(/\{/g)?.length ?? 0) - (body.match(/\}/g)?.length ?? 0);
-  const square = (body.match(/\[/g)?.length ?? 0) - (body.match(/\]/g)?.length ?? 0);
-  if (square > 0) body += "]".repeat(square);
-  if (curly > 0) body += "}".repeat(curly);
-  return body;
+  const value = readModelAny(text);
+  if (value == null) throw new Error("JSON yok");
+  return value;
 }
 
 function salvageNarration(raw: string) {
@@ -274,19 +245,9 @@ async function draftText(input: {
   user: string;
   sealed?: SealedKey;
   maxTokens?: number;
-}): Promise<{ ok: true; text: string; label: string } | { ok: false; error: string }> {
-  const { chooseTextRoute, completeText, runCliText, sourceLabel } = await import("./ai-runtime");
+}): Promise<{ ok: true; text: string; label: string } | { ok: false; error: string; stopped?: boolean }> {
+  const { completeText } = await import("./ai-runtime");
   const hinted = viaOf(input.via);
-  const route = hinted
-    ? { ok: true as const, via: hinted, label: sourceLabel(hinted) }
-    : await chooseTextRoute({ writer: input.writer, model: input.model, sealed: input.sealed });
-  if (!route.ok) return route;
-  const prompt = `${input.system}\n\n${input.user}`;
-  if (route.via !== "api") {
-    const cli = await runCliText(route.via, prompt);
-    if (!cli.ok) return cli;
-    return { ok: true, text: cli.text, label: route.label };
-  }
   const result = await completeText({
     model: input.model,
     system: input.system,
@@ -294,14 +255,10 @@ async function draftText(input: {
     sealed: input.sealed,
     json: true,
     maxTokens: input.maxTokens,
+    writer: hinted && hinted !== "api" ? hinted : input.writer,
   });
-  if (result.ok) return { ok: true, text: result.text, label: "API" };
-  if (!/anahtar yok/i.test(result.error)) return result;
-  const fallback = await chooseTextRoute({ writer: "cli", model: input.model, sealed: input.sealed });
-  if (!fallback.ok || fallback.via === "api") return result;
-  const cli = await runCliText(fallback.via, prompt);
-  if (!cli.ok) return cli;
-  return { ok: true, text: cli.text, label: fallback.label };
+  if (!result.ok) return { ok: false, error: result.error, stopped: result.stopped };
+  return { ok: true, text: result.text, label: result.via };
 }
 
 export const deepenPack = createServerFn({ method: "POST" })
@@ -356,19 +313,39 @@ export const deepenPack = createServerFn({ method: "POST" })
         sealed: sealedKey,
       });
       if (!result.ok) return { ok: false, error: result.error };
-      let parsedPack: ReturnType<typeof extractJson>;
-      try {
-        parsedPack = extractJson(result.text);
-      } catch {
-        return { ok: false, error: "Metin kesildi. Senaryoda Devam et ile sürdür." };
+      let parsedPack: ReturnType<typeof extractJson> | undefined;
+      let text = result.text;
+      let label = result.label;
+      for (let attempt = 0; attempt < 2 && parsedPack == null; attempt += 1) {
+        try {
+          parsedPack = extractJson(text);
+        } catch (error) {
+          console.warn(error);
+          if (attempt === 1) {
+            return { ok: false, error: error instanceof Error ? error.message : "JSON yok" };
+          }
+          const again = await draftText({
+            writer,
+            via: record?.via,
+            model: textModel,
+            system,
+            user: `${JSON.stringify(brief)}\n\nSadece JSON döndür.`,
+            sealed: sealedKey,
+          });
+          if (!again.ok) return { ok: false, error: again.error };
+          text = again.text;
+          label = again.label;
+        }
       }
+      if (parsedPack == null) return { ok: false, error: "JSON yok" };
       const pack = parseGeneratedPack(parsedPack);
       if (!pack.success) {
         return { ok: false, error: "Paket eksik döndü. Senaryoda Devam et ya da masa kalıbında kal." };
       }
-      return { ok: true, pack: pack.data, label: result.label };
-    } catch {
-      return { ok: false, error: "Bağlantı koptu. Masa kalıbı duruyor." };
+      return { ok: true, pack: pack.data, label };
+    } catch (error) {
+      console.warn(error);
+      return { ok: false, error: error instanceof Error ? error.message : "Bağlantı koptu. Masa kalıbı duruyor." };
     }
   });
 
@@ -576,7 +553,8 @@ export const continueBeats = createServerFn({ method: "POST" })
       let raw: unknown;
       try {
         raw = extractJson(result.text);
-      } catch {
+      } catch (error) {
+      console.warn(error);
         raw = null;
       }
       const root = asRecord(raw);
@@ -597,8 +575,44 @@ export const continueBeats = createServerFn({ method: "POST" })
         return parsed.success && parsed.data.voice !== "…" ? [parsed.data] : [];
       });
       if (!beats.length) {
-        const prose = salvageNarration(result.text) || result.text.replace(/```json|```/g, "").trim();
-        if (prose.length < 80 || prose.startsWith("{")) return { ok: false as const, error: "Metin kesildi. Yine Devam et.", cut: true };
+        const again = await draftText({
+          writer,
+          via: row?.via,
+          model: textModel,
+          system,
+          user: `${user}\n\nSadece JSON döndür.`,
+          sealed: sealedKey,
+          maxTokens: 2200,
+        });
+        if (!again.ok) return { ok: false as const, error: again.error, cut: true };
+        try {
+          raw = extractJson(again.text);
+        } catch (error) {
+          console.warn(error);
+          raw = null;
+        }
+        const retryRoot = asRecord(raw);
+        const retryList = Array.isArray(retryRoot?.beats) ? retryRoot.beats : Array.isArray(raw) ? raw : [];
+        const retryBeats = retryList.flatMap((item) => {
+          const beat = asRecord(item);
+          const parsed = ContinueBeat.safeParse(
+            beat
+              ? {
+                  time: clip(beat.time, 16, "0:00"),
+                  title: clip(beat.title, 80, "Devam"),
+                  voice: clip(beat.voice, 1800, ""),
+                  screen: clip(beat.screen, 160, "Anlatı"),
+                  visual: clip(beat.visual, 240, "Sahne sürer."),
+                }
+              : item,
+          );
+          return parsed.success && parsed.data.voice !== "…" ? [parsed.data] : [];
+        });
+        if (retryBeats.length) return { ok: true as const, beats: retryBeats, cut: false };
+        const prose = salvageNarration(again.text) || result.text.replace(/```json|```/g, "").trim();
+        if (prose.length < 80 || prose.startsWith("{")) {
+          return { ok: false as const, error: "Metin kesildi. Yine Devam et.", cut: true };
+        }
         return {
           ok: true as const,
           beats: [{ time: "devam", title: "Devam", voice: clip(prose, 1800), screen: "Anlatı", visual: "Önceki sahne sürer." }],
@@ -607,8 +621,9 @@ export const continueBeats = createServerFn({ method: "POST" })
       }
       const cut = result.text.trim().endsWith("}") ? false : true;
       return { ok: true as const, beats, cut };
-    } catch {
-      return { ok: false as const, error: "Bağlantı koptu.", cut: true };
+    } catch (error) {
+      console.warn(error);
+      return { ok: false as const, error: error instanceof Error ? error.message : "Bağlantı koptu.", cut: true };
     }
   });
 
@@ -666,19 +681,41 @@ export const writeNarration = createServerFn({ method: "POST" })
       try {
         const parsed = asRecord(extractJson(result.text));
         if (typeof parsed?.text === "string") text = parsed.text.trim();
-      } catch {
+      } catch (error) {
+      console.warn(error);
         text = salvageNarration(result.text);
         cut = Boolean(text);
       }
       if (text.length < 40) {
-        const plain = result.text.replace(/```json|```/g, "").trim();
-        if (plain.length > 40 && !plain.startsWith("{")) text = plain;
+        const again = await draftText({
+          writer,
+          via: row?.via,
+          model: textModel,
+          system,
+          user: `${user}\n\nSadece JSON döndür.`,
+          sealed: sealedOf(row?.sealed),
+          maxTokens: 2200,
+        });
+        if (!again.ok) return { ok: false as const, error: again.error };
+        try {
+          const parsed = asRecord(extractJson(again.text));
+          if (typeof parsed?.text === "string") text = parsed.text.trim();
+        } catch (error) {
+          console.warn(error);
+          text = salvageNarration(again.text);
+        }
+        if (text.length < 40) {
+          const plain = again.text.replace(/```json|```/g, "").trim();
+          if (plain.length > 40 && !plain.startsWith("{")) text = plain;
+        }
+        if (text.length < 40) return { ok: false as const, error: "Metin kesildi. Yine Devam et." };
+        return { ok: true as const, text, label: again.label, cut: !again.text.trim().endsWith("}") };
       }
-      if (text.length < 40) return { ok: false as const, error: "Metin kesildi. Yine Devam et." };
       if (!result.text.trim().endsWith("}")) cut = true;
       return { ok: true as const, text, label: result.label, cut };
-    } catch {
-      return { ok: false as const, error: "Bağlantı koptu." };
+    } catch (error) {
+      console.warn(error);
+      return { ok: false as const, error: error instanceof Error ? error.message : "Bağlantı koptu." };
     }
   });
 

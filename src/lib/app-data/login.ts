@@ -11,7 +11,8 @@ export function isConnectorPending(result: CallToolResult): boolean {
 export function isFramed(): boolean {
   try {
     return window.self !== window.top;
-  } catch {
+  } catch (error) {
+      console.warn(error);
     return true;
   }
 }
