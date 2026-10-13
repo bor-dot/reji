@@ -1,11 +1,12 @@
 import { useServerFn } from "@tanstack/react-start";
 import { useEffect, useRef, useState } from "react";
 import type { Channel } from "@/lib/studio/channels";
-import { scenesFor } from "@/lib/studio/engine";
+import { scenesFor, chaptersFromBeats } from "@/lib/studio/engine";
 import { exportFolderName } from "@/lib/studio/karevo";
 import { productionLook, voiceCast } from "@/lib/studio/look";
 import { narrationText, spreadNarration } from "@/lib/studio/narration";
 import { openShoot, produceMedia, produceStep, produceVoice, saveShoot } from "@/lib/studio/produce";
+import { keepRemoteMedia } from "@/lib/studio/project-files";
 import { cleanSpeech } from "@/lib/studio/speech-clean";
 import { useStudio } from "@/lib/studio/store";
 import { notify } from "@/lib/studio/toast";
@@ -28,12 +29,11 @@ const STEPS = [
   ["baslik", "Başlık"],
   ["kanca", "Kanca"],
   ["senaryo", "Senaryo"],
-  ["metin", "Metin"],
-  ["sahneler", "Sahne listesi"],
+  ["ses", "Ses"],
+  ["altsahne", "Sahne promptu"],
   ["gorsel", "Görsel"],
   ["video", "Video"],
-  ["ses", "Ses"],
-  ["kapak", "Kapak"],
+  ["yayin", "Yayın"],
   ["kontrol", "Kontrol"],
 ] as const;
 
@@ -84,6 +84,7 @@ export function ProduceScreen({
   const voice = useServerFn(produceVoice);
   const save = useServerFn(saveShoot);
   const open = useServerFn(openShoot);
+  const keep = useServerFn(keepRemoteMedia);
   const look = productionLook(channel);
   const cast = voiceCast(channel);
   const [cursor, setCursor] = useState(0);
@@ -184,50 +185,68 @@ export function ProduceScreen({
             ms: Date.now() - started,
             source: res.label,
             preview: res.beats.map((beat) => `${beat.time} ${beat.title}`).join("\n"),
-            detail: `${res.beats.length} bölüm. Metin sonra yazılır.`,
+            detail: `${res.beats.length} bölüm. Taslak kalktı.`,
           });
         } else throw new Error("Bu adım boş döndü.");
         return;
       }
-      if (step === "metin") {
-        const res = await withTimeout(stepCall({ data: { step, ...fields() } }), 180_000);
+      if (step === "altsahne") {
+        let list = scenes;
+        if (scenes.every((scene) => scene.draft || !scene.spoken) && pack.beats.some((beat) => beat.voice && !beat.draft)) {
+          list = [];
+          for (const beat of pack.beats) {
+            const groups = sentenceGroups(beat.voice);
+            groups.forEach((spoken, group) => {
+              list.push({
+                id: `sahne-${list.length + 1}`,
+                title: groups.length > 1 ? `${beat.title} ${group + 1}` : beat.title,
+                spoken,
+                imagePrompt: "",
+                videoPrompt: "",
+                summary: "",
+                simulation: false,
+                draft: false,
+              });
+            });
+          }
+          patchPack(project.id, { scenes: list });
+        }
+        const index = list.findIndex((scene) => !scene.imagePrompt);
+        if (index < 0) {
+          setImageAt(0);
+          setVideoAt(0);
+          patch(step, { status: "bitti", ms: Date.now() - started, detail: `${list.length} sahne promptu`, preview: list.map((scene) => scene.summary).filter(Boolean).join("\n") });
+          return;
+        }
+        const scene = list[index];
+        const asked = await withTimeout(
+          stepCall({
+            data: {
+              step,
+              ...fields({
+                anlatim: scene.spoken || scene.title,
+                onceki: list.slice(0, index).map((item) => item.summary).filter(Boolean).join(" | ") || "yok",
+                benzer: list[index - 1]?.imagePrompt || "",
+              }),
+            },
+          }),
+          180_000,
+        );
         if (!fresh()) return;
-        if (!res.ok) throw new Error(res.error);
-        if (!("parcalar" in res) || !res.parcalar) throw new Error("Metin boş döndü.");
-        const next = res.parcalar.join("\n\n");
-        setParts(res.parcalar);
-        const cleaned = cleanSpeech(res.parcalar.join("\n\n"));
-        setSpeech(cleaned.text);
-        setRemoved(cleaned.removed);
-        setSpeechReady(false);
-        patchPack(project.id, { beats: spreadNarration(pack.beats, next), source: "grok" });
-        patch(step, { status: "bitti", ms: Date.now() - started, source: res.label, preview: next.slice(0, 700), detail: `${res.parcalar.length} parça` });
-        return;
-      }
-      if (step === "sahneler") {
-        const res = await withTimeout(stepCall({ data: { step, ...fields() } }), 180_000);
-        if (!fresh()) return;
-        if (!res.ok) throw new Error(res.error);
-        if (!("sahneler" in res) || !res.sahneler) throw new Error("Sahne listesi boş.");
-        const nextScenes = res.sahneler.map((scene) => ({
-          id: `sahne-${scene.no}`,
-          title: scene.anlatim.slice(0, 80),
-          spoken: scene.anlatim,
-          imagePrompt: "",
-          videoPrompt: "",
-          simulation: scene.ai_simulasyon,
-          seconds: scene.sure_sn,
-          mediaKind: scene.tur,
-        }));
-        patchPack(project.id, { scenes: nextScenes });
-        setImageAt(0);
-        setVideoAt(0);
+        if (!asked.ok) throw new Error(asked.error);
+        if (!("prompt" in asked) || !asked.prompt || !("video_prompt" in asked) || !asked.video_prompt) throw new Error("Sahne promptu gelmedi.");
+        const ozet = "konu_ozeti" in asked && asked.konu_ozeti ? asked.konu_ozeti : scene.title;
+        const next = list.map((item, itemIndex) =>
+          itemIndex === index ? { ...item, summary: ozet, imagePrompt: asked.prompt || "", videoPrompt: asked.video_prompt || "", draft: false } : item,
+        );
+        patchPack(project.id, { scenes: next });
+        const done = next.every((item) => item.imagePrompt);
         patch(step, {
-          status: "bitti",
+          status: done ? "bitti" : "bekliyor",
           ms: Date.now() - started,
-          source: res.label,
-          preview: nextScenes.map((scene, index) => `${index + 1}. ${scene.spoken}`).join("\n"),
-          detail: `${nextScenes.length} sahne`,
+          source: asked.label,
+          preview: "",
+          detail: `${index + 1}/${next.length} · ${ozet}`,
         });
         return;
       }
@@ -304,12 +323,23 @@ export function ProduceScreen({
         );
         if (!fresh()) return;
         if (!res.ok) throw new Error(res.copy ? `${res.error} ${prompt}` : res.error);
+        const stored = await keep({
+          data: {
+            projectId: project.id,
+            folder: step === "gorsel" ? "gorsel" : "video",
+            name: `${String(index + 1).padStart(2, "0")}.${step === "gorsel" ? "png" : "mp4"}`,
+            url: res.url,
+          },
+        });
+        if (!stored.ok) throw new Error(stored.error);
         const nextScenes = scenes.map((item, itemIndex) =>
           itemIndex === index
             ? {
                 ...item,
                 summary: ozet || item.summary,
-                ...(step === "gorsel" ? { imagePrompt: prompt, imageUrl: res.url } : { videoPrompt: prompt, videoUrl: res.url }),
+                ...(step === "gorsel"
+                  ? { imagePrompt: prompt, imagePath: stored.path, imageUrl: undefined }
+                  : { videoPrompt: prompt, videoPath: stored.path, videoUrl: undefined, videoStatus: "hazır" }),
               }
             : item,
         );
@@ -327,45 +357,24 @@ export function ProduceScreen({
         return;
       }
       if (step === "ses") {
-        const source = speech.trim() || (parts.length ? parts.join(" ") : pack.beats.map((beat) => beat.voice).join(" "));
-        const cleaned = cleanSpeech(source);
-        if (!speech.trim()) {
-          setSpeech(cleaned.text);
-          setRemoved(cleaned.removed);
-        }
-        if (!auto && !speechReady) {
-          setRemoved(cleaned.removed);
-          setSpeech(cleaned.text);
-          setSpeechReady(true);
-          patch(step, {
-            status: "bekliyor",
-            ms: Date.now() - started,
-            source: "Temizlik",
-            preview: cleaned.text.slice(0, 700),
-            detail: cleaned.blocked ? "Bu parçada sahne notu kaldı." : "Metni oku, düzelt, sonra onayla.",
-          });
-          if (cleaned.blocked) notify("Bu parçada sahne notu kaldı. Seslendirilmedi.");
+        const beat = pack.beats[voiceAt];
+        if (!beat) {
+          patch(step, { status: "bitti", detail: "Seslenecek bölüm kalmadı.", ms: Date.now() - started, source: cast.sesle });
           return;
         }
-        const ready = cleanSpeech(speech.trim() || cleaned.text);
-        setRemoved(ready.removed);
-        if (ready.blocked) {
-          notify("Bu parçada sahne notu kaldı. Seslendirilmedi.");
-          throw new Error("Bu parçada Sahne, Görsel ya da köşeli parantez kaldı.");
-        }
-        const piece = ready.pieces[voiceAt];
-        if (!piece) {
-          patch(step, { status: "bitti", detail: "Okunacak parça kalmadı.", ms: Date.now() - started, source: cast.sesle });
-          return;
-        }
+        if (beat.draft) throw new Error("Bölüm hâlâ taslak. Önce senaryo yazılsın.");
+        const cleaned = cleanSpeech(beat.voice);
+        if (cleaned.blocked) throw new Error(cleaned.blocked);
         const res = await withTimeout(
           voice({
             data: {
-              text: piece,
+              text: cleaned.text.slice(0, 3000),
               sesle: cast.sesle,
               xai: cast.xai,
               language: project.brief.language,
               folder: exportFolderName(project.brief.title),
+              projectId: project.id,
+              index: voiceAt,
               sealed: seal(),
             },
           }),
@@ -373,36 +382,37 @@ export function ProduceScreen({
         );
         if (!fresh()) return;
         if (!res.ok) throw new Error(res.error);
-        setAudios((prev) => {
-          const next = [...prev];
-          next[voiceAt] = res.audioBase64;
-          return next;
+        patchPack(project.id, {
+          beats: pack.beats.map((item, index) =>
+            index === voiceAt ? { ...item, voice: cleaned.text, audioPath: res.path, duration: res.duration || item.duration, draft: false } : item,
+          ),
         });
         setVoiceAt(voiceAt + 1);
+        const done = voiceAt + 1 >= pack.beats.length;
         patch(step, {
-          status: voiceAt + 1 >= ready.pieces.length ? "bitti" : "bekliyor",
+          status: done ? "bitti" : "bekliyor",
           ms: Date.now() - started,
           source: res.source,
           preview: `data:audio/mpeg;base64,${res.audioBase64}`,
-          detail: `${voiceAt + 1}/${ready.pieces.length} · ${cast.sesle}${ready.removed.length ? ` · Çıkarılan ${ready.removed.length}` : ""}`,
+          detail: `${voiceAt + 1}/${pack.beats.length} · ${res.path || beat.title}`,
         });
         return;
       }
-      if (step === "kapak") {
+      if (step === "yayin") {
         const asked = await withTimeout(stepCall({ data: { step, ...fields() } }), 180_000);
         if (!fresh()) return;
         if (!asked.ok) throw new Error(asked.error);
-        if (!("gorsel_prompt" in asked) || !asked.gorsel_prompt) throw new Error("Kapak promptu yok.");
-        const res = await withTimeout(
-          media({
-            data: { kind: "image", prompt: asked.gorsel_prompt, aspect: look.aspect, imageModel: models.image, xai: seal(), gemini: geminiSeal() },
-          }),
-          190_000,
-        );
-        if (!fresh()) return;
-        patchPack(project.id, { thumb: { ...pack.thumb, words: asked.kapak_yazisi || pack.thumb.words, imageUrl: res.ok ? res.url : pack.thumb.imageUrl } });
-        if (!res.ok) throw new Error(`${res.error} ${asked.gorsel_prompt}`);
-        patch(step, { status: "bitti", ms: Date.now() - started, source: res.source, preview: res.url, detail: asked.kapak_yazisi });
+        if (!("aciklama" in asked) || !asked.aciklama) throw new Error("Açıklama gelmedi.");
+        patchPack(project.id, {
+          seo: {
+            ...pack.seo,
+            description: asked.aciklama,
+            tags: asked.etiketler ?? pack.seo.tags,
+            pinned: asked.sabit_yorum || pack.seo.pinned,
+            chapters: chaptersFromBeats(pack.beats),
+          },
+        });
+        patch(step, { status: "bitti", ms: Date.now() - started, source: asked.label, preview: asked.aciklama.slice(0, 280), detail: "YouTube'a yüklerken kopyala-yapıştır" });
         return;
       }
       const checked = await withTimeout(stepCall({ data: { step: "kontrol", ...fields() } }), 180_000);
@@ -620,14 +630,21 @@ export function ProduceScreen({
 function previewOf(id: string, pack: Pack) {
   if (id === "baslik") return pack.titles[pack.pick]?.text ?? "";
   if (id === "kanca") return pack.hooks[0]?.line ?? "";
-  if (id === "senaryo") return pack.beats.map((beat) => `${beat.time} ${beat.title}`).join("\n");
-  if (id === "metin") return narrationText(pack.beats).slice(0, 700);
+  if (id === "senaryo") return pack.beats.map((beat) => `${beat.draft ? "taslak " : ""}${beat.time} ${beat.title}`).join("\n");
+  if (id === "yayin") return pack.seo.description.slice(0, 280);
   return "";
+}
+
+function sentenceGroups(text: string) {
+  const sentences = text.split(/(?<=[.!?])\s+/).map((item) => item.trim()).filter((item) => item.length > 8);
+  const groups: string[] = [];
+  for (let index = 0; index < sentences.length; index += 2) groups.push(sentences.slice(index, index + 2).join(" "));
+  return groups.length ? groups : [text];
 }
 
 function stepLabel(
   step: StepId,
-  speechReady: boolean,
+  _speechReady: boolean,
   imageAt: number,
   videoAt: number,
   voiceAt: number,
@@ -636,11 +653,10 @@ function stepLabel(
   if (step === "baslik") return "Başlığı Grok yazsın";
   if (step === "kanca") return "Kancayı Grok yazsın";
   if (step === "senaryo") return "Senaryoyu Grok yazsın";
-  if (step === "metin") return "Metni Grok yazsın";
-  if (step === "sahneler") return "Sahne listesini Grok yazsın";
+  if (step === "altsahne") return "Sahne promptunu yaz";
   if (step === "gorsel") return scenes[imageAt]?.imagePrompt ? "Bunu çiz" : "Ne çizileceğini yaz";
   if (step === "video") return scenes[videoAt]?.videoPrompt ? "Bunu çek" : "Ne çekileceğini yaz";
-  if (step === "ses") return !speechReady || voiceAt === 0 ? "Onayla ve seslendir" : "Sıradaki parçayı oku";
-  if (step === "kapak") return "Kapağı çiz";
+  if (step === "ses") return voiceAt === 0 ? "İlk bölümü seslendir" : "Sıradaki bölümü seslendir";
+  if (step === "yayin") return "Yayın metnini yaz";
   return "Puanı hesapla";
 }

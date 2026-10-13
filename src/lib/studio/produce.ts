@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServerFn } from "@tanstack/react-start";
 import { openExportFolder, writeShootFiles, type ShootFile } from "./karevo-write";
-import { acceptIdeas, acceptStep, mediaPromptProblem, promptFor, readModelAny, readModelJson, sectionCount, type StepName } from "./prompts";
+import { acceptIdeas, acceptStep, mediaPromptProblem, promptFor, readModelAny, readModelJson, readSections, sectionCount, targetWords, type StepName } from "./prompts";
+import { writeProjectBytes } from "./project-files";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -114,7 +115,8 @@ export const produceVoice = createServerFn({ method: "POST" })
         const job = sesleJob(started.jobId);
         const chunk = job?.chunks[0];
         if (chunk?.status === "tamam" && chunk.audioBase64) {
-          return { ok: true as const, audioBase64: chunk.audioBase64, source: "Sesle", duration: 0 };
+          const path = await keepVoice(row, chunk.audioBase64);
+          return { ok: true as const, audioBase64: chunk.audioBase64, source: "Sesle", duration: 0, path };
         }
         if (job?.status === "hata" || chunk?.status === "hata") break;
       }
@@ -129,8 +131,21 @@ export const produceVoice = createServerFn({ method: "POST" })
     });
     if (!spoken.ok) return { ok: false as const, error: spoken.error };
     const audioBase64 = await levelAudio(spoken.audioBase64);
-    return { ok: true as const, audioBase64, source: "xAI Ses", duration: spoken.duration || 0 };
+    const path = await keepVoice(row, audioBase64);
+    return { ok: true as const, audioBase64, source: "xAI Ses", duration: spoken.duration || 0, path };
   });
+
+async function keepVoice(row: Record<string, unknown> | null, audioBase64: string) {
+  const projectId = typeof row?.projectId === "string" ? row.projectId : "";
+  const index = typeof row?.index === "number" ? row.index : -1;
+  if (!projectId || index < 0) return "";
+  try {
+    return await writeProjectBytes(projectId, "ses", `${String(index + 1).padStart(2, "0")}.mp3`, Buffer.from(audioBase64, "base64"));
+  } catch (error) {
+    console.error("Ses dosyası yazılamadı.", error);
+    return "";
+  }
+}
 
 export const saveShoot = createServerFn({ method: "POST" })
   .validator((input: unknown) => input)
@@ -170,7 +185,7 @@ export const openShoot = createServerFn({ method: "POST" })
     return openExportFolder(folder);
   });
 
-const STEP_IDS: StepName[] = ["baslik", "kanca", "senaryo", "metin", "sahneler", "gorsel", "video", "kapak", "kontrol"];
+const STEP_IDS: StepName[] = ["baslik", "kanca", "senaryo", "metin", "sahneler", "gorsel", "video", "kapak", "kontrol", "altsahne", "yayin"];
 
 function stepOf(value: unknown): StepName {
   return STEP_IDS.includes(value as StepName) ? (value as StepName) : "baslik";
@@ -196,6 +211,7 @@ export const produceStep = createServerFn({ method: "POST" })
       kanca: typeof row?.hook === "string" ? row.hook.slice(0, 500) : "",
       kaynaklar: typeof row?.sources === "string" ? row.sources.slice(0, 1500) : "",
       dakika: String(minutes),
+      kelime: String(targetWords(minutes)),
       bolum_sayisi: String(typeof row?.bolum === "number" ? row.bolum : sectionCount(minutes)),
       senaryo: typeof row?.senaryo === "string" ? row.senaryo.slice(0, 6000) : "",
       parcalar: typeof row?.parcalar === "string" ? row.parcalar.slice(0, 4000) : "",
@@ -231,7 +247,7 @@ export const produceStep = createServerFn({ method: "POST" })
     };
     let text = await ask("");
     let parsed = text ? readModelJson(text) : null;
-    const ctx = { konu: vars.konu, anlatim: vars.anlatim };
+    const ctx = { konu: vars.konu, anlatim: vars.anlatim, benzer: typeof row?.benzer === "string" ? row.benzer.slice(0, 700) : "" };
     let accepted = parsed ? acceptStep(step, parsed, ctx) : null;
     if (!accepted) {
       const why =
@@ -243,6 +259,25 @@ export const produceStep = createServerFn({ method: "POST" })
       accepted = parsed ? acceptStep(step, parsed, ctx) : null;
     }
     if (!accepted) return { ok: false as const, error: "Bu adımın JSON'u okunamadı. Yine dene." };
+    if (step === "senaryo" && accepted.bolumler && accepted.beats) {
+      const goal = targetWords(minutes);
+      let bolumler = accepted.bolumler;
+      const words = () => bolumler.reduce((sum, item) => sum + item.metin.split(/\s+/).filter(Boolean).length, 0);
+      let guard = 0;
+      while (words() < goal * 0.85 && guard < 3) {
+        guard += 1;
+        const moreText = await ask(
+          `Şu an ${words()} kelime var. Hedef ${goal}. Kalan bölümleri yaz, öncekileri tekrarlama. Yalnızca {"bolumler":[{"baslik":"","metin":""}]} ver. Metin yalnızca okunacak cümle olsun.`,
+        );
+        const more = moreText ? readModelJson(moreText) : null;
+        const extra = more ? readSections(more, 1) : null;
+        if (!extra) break;
+        const seen = new Set(bolumler.map((item) => item.baslik));
+        bolumler = [...bolumler, ...extra.bolumler.filter((item) => !seen.has(item.baslik))];
+      }
+      const full = readSections({ bolumler }, 3);
+      if (full) accepted = { ...accepted, ...full };
+    }
     return { ok: true as const, label: route.label, step, ...accepted };
   });
 

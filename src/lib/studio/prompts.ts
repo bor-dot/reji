@@ -1,3 +1,5 @@
+import { cleanSpeech } from "./speech-clean";
+
 export type StepName =
   | "baslik"
   | "kanca"
@@ -8,7 +10,9 @@ export type StepName =
   | "video"
   | "kapak"
   | "kontrol"
-  | "fikir";
+  | "fikir"
+  | "altsahne"
+  | "yayin";
 
 const COMMON =
   "Sen {kanal} YouTube kanalının yapımcısısın. Tür: {konu_türü}, kitle: {kitle}, ton: {ton}, stil: {stil}. Türkçe yaz. Sadece istenen JSON'u ver.";
@@ -16,7 +20,7 @@ const COMMON =
 const STEPS: Record<StepName, string> = {
   baslik: `Konu {konu}, vaat {vaat}. 5 başlık, her biri en fazla 60 karakter, merak uyandırsın, tıklama tuzağı olmasın, sözünü tutsun; biri soru, biri sayı, biri şaşırtıcı gerçek. {"basliklar":[],"secilen":0,"neden":""}`,
   kanca: `Başlık {baslik}. İlk 15 sn için 3 kanca (35–45 kelime). İlk cümle şaşırtıcı gerçek ya da soru, başlığın sözünü hemen doğrulasın, "bu videoda" ile başlamasın. {"kancalar":[],"secilen":0}`,
-  senaryo: `Başlık {baslik}, kanca {kanca}, kaynaklar {kaynaklar}, süre {dakika} dk (~140 kelime/dk). Giriş, {bolum_sayisi} bölüm, kapanış ve abone çağrısı. Sadece kaynaklardaki bilgileri kullan; emin olmadığın iddiayı yazma. Her 60–90 sn'de yeni bir merak sorusu aç. {"bolumler":[{"baslik":"","metin":""}]}`,
+  senaryo: `Başlık {baslik}, kanca {kanca}, kaynaklar {kaynaklar}, süre {dakika} dk, hedef {kelime} kelime. Giriş, gelişme bölümleri ve kapanış. Her bölümün metin alanı yalnızca anlatıcının yüksek sesle okuyacağı cümleler olsun: parantez, köşeli parantez, sahne tarifi, zaman kodu ve yönerge yazma. Sadece kaynaklardaki bilgileri kullan. Her 60–90 sn'de yeni bir merak sorusu aç. Bölüm sayısını kelime hedefine göre ayarla, 10 ile sınırlama. {"bolumler":[{"baslik":"","metin":""}]}`,
   metin: `Senaryodan yalnızca anlatıcının yüksek sesle okuyacağı cümleleri çıkar. Parantez, köşeli parantez, sahne tarifi, ton/duraklama notu, başlık, zaman kodu yazma. Doğal konuşma dili, uzun cümleleri böl, sayıları okunacak biçimde yaz. En fazla 1.800 karakterlik parçalar, cümle ortasından bölme. Senaryo:\n{senaryo}\n{"parcalar":[]}`,
   sahneler: `Parçalar {parcalar}. Her 6–8 sn'lik anlatım için bir sahne; her sahne söylenen cümleye hizmet etsin. {"sahneler":[{"no":1,"anlatim":"","sure_sn":6,"tur":"video","ai_simulasyon":false}]}`,
   gorsel: `Video konusu: {konu}. Kanal: {kanal}, stil: {stil}.
@@ -57,11 +61,25 @@ Bu kanala uygun 5 YouTube video fikri üret. Kurallar:
 - Kanalın alanı dışına çıkma (bilimcifikri=bilim/uzay/biyoloji; mitocolik=mitoloji/tarih; Bir Kitabın Anatomisi=kitap/fikir; Papi Pupa=çocuklara uygun eğlenceli öğretici).
 - Aynı konudan 3-4 videoluk seri çıkabilecekse belirt.
 JSON: [{"baslik_onerisi":"","konu":"","neden_tutar":"1 cümle","kaynak_arama":"doğrulama için anahtar kelime","seri_olur_mu":true}]`,
+  altsahne: `Video konusu: {konu}. Kanal: {kanal}, stil: {stil}.
+Bu alt sahnenin anlatım cümlesi: {anlatim}.
+Bir önceki sahne özeti: {onceki}
+Görevin: bu cümlenin anlattığı şeyi tek bir net görüntüye çevirmek.
+Kurallar:
+- Cümledeki somut nesneyi, olayı veya kavramı çiz. Soyutsa bilimsel görselleştirme veya somut benzetme seç.
+- Bölüm adlarını (Kanca, Giriş, Bölüm, Kapanış, Abone) çizme. Görselde yazı, logo, altyazı yok.
+- Kanal stiline uy. Önceki sahneyle aynı palet ve mekân.
+- image_prompt İngilizce, en fazla 60 kelime. video_prompt İngilizce, en fazla 50 kelime, tek kamera hareketi, kesme yok.
+JSON: {"konu_ozeti":"Türkçe, ne gösteriliyor","image_prompt":"...","video_prompt":"..."}`,
+  yayin: `Başlık {baslik}. Senaryo:
+{senaryo}
+YouTube açıklaması, 12 etiket ve sabit yorum üret. Açıklama gerçek senaryodan gelsin, uydurma iddia ekleme. Bölüm zamanlarını yazma, onları kod hesaplar.
+JSON: {"aciklama":"","etiketler":[],"sabit_yorum":""}`,
 };
 
 export function fillPrompt(template: string, vars: Record<string, string>) {
   return template.replace(
-    /\{(kanal|konu_türü|kitle|ton|stil|konu|vaat|baslik|kanca|kaynaklar|dakika|bolum_sayisi|senaryo|parcalar|anlatim|gorsel_prompt|ses|hız|kapak_stili|oran|onceki|kanal_adi|kanal_aciklama|son_konular)\}/g,
+    /\{(kanal|konu_türü|kitle|ton|stil|konu|vaat|baslik|kanca|kaynaklar|dakika|bolum_sayisi|senaryo|parcalar|anlatim|gorsel_prompt|ses|hız|kapak_stili|oran|onceki|kanal_adi|kanal_aciklama|son_konular|kelime)\}/g,
     (token, key: string) => (token ? (vars[key] ?? "") : ""),
   );
 }
@@ -70,9 +88,14 @@ export function promptFor(step: StepName, vars: Record<string, string>) {
   return `${fillPrompt(COMMON, vars)}\n${fillPrompt(STEPS[step], vars)}`;
 }
 
+export function targetWords(minutes: number) {
+  const value = Number.isFinite(minutes) ? minutes : 8;
+  return Math.round(Math.min(30, Math.max(1, value)) * 145);
+}
+
 export function sectionCount(minutes: number) {
   const value = Number.isFinite(minutes) ? minutes : 8;
-  return Math.max(3, Math.min(6, Math.round(value)));
+  return Math.max(4, Math.min(12, Math.round(value)));
 }
 
 export function readModelJson(text: string): Record<string, unknown> | null {
@@ -179,6 +202,10 @@ export type StepResult = {
   sorunlar?: string[];
   duzeltmeler?: string[];
   ideas?: Idea[];
+  video_prompt?: string;
+  aciklama?: string;
+  etiketler?: string[];
+  sabit_yorum?: string;
 };
 
 export type Idea = {
@@ -232,7 +259,7 @@ export function acceptIdeas(raw: unknown): Idea[] | null {
 export function acceptStep(
   step: StepName,
   raw: Record<string, unknown>,
-  ctx: { konu?: string; anlatim?: string } = {},
+  ctx: { konu?: string; anlatim?: string; benzer?: string } = {},
 ): StepResult | null {
   if (step === "baslik") {
     const basliklar = strings(raw.basliklar, 60, 5);
@@ -256,26 +283,24 @@ export function acceptStep(
       hooks: kancalar.map((line) => ({ window: "0:00-0:15", line, visual: "Tek açılış planı.", cut: "Söz bitince kes." })),
     };
   }
-  if (step === "senaryo") {
-    const bolumler = (Array.isArray(raw.bolumler) ? raw.bolumler : [])
-      .map((item) => {
-        const row = item && typeof item === "object" ? (item as Record<string, unknown>) : null;
-        if (!row) return null;
-        const baslik = clip(row.baslik, 80);
-        const metin = clip(row.metin, 1800);
-        if (!baslik || metin.length < 8) return null;
-        return { baslik, metin };
-      })
-      .filter((item): item is { baslik: string; metin: string } => Boolean(item))
-      .slice(0, 8);
-    if (bolumler.length < 3) return null;
-    let cursor = 0;
-    const beats = bolumler.map((item) => {
-      const time = stamp(cursor);
-      cursor += Math.max(20, Math.round((item.metin.split(/\s+/).length / 140) * 60));
-      return { time, title: item.baslik, voice: item.metin, screen: "Anlatı", visual: item.baslik };
-    });
-    return { bolumler, beats };
+
+  if (step === "senaryo") return readSections(raw, 3);
+  if (step === "altsahne") {
+    const image = clip(raw.image_prompt ?? raw.prompt, 700);
+    const video = clip(raw.video_prompt, 500);
+    const ozet = clip(raw.konu_ozeti, 220);
+    const problem = mediaPromptProblem("gorsel", { prompt: image, konu_ozeti: ozet }, ctx);
+    const videoProblem = mediaPromptProblem("video", { prompt: video, konu_ozeti: ozet }, ctx);
+    if (problem || videoProblem || !ozet) return null;
+    if (ctx.benzer && (promptsTooAlike(image, ctx.benzer) || promptsTooAlike(video, ctx.benzer))) return null;
+    return { konu_ozeti: ozet, prompt: image, video_prompt: video, gorsel_prompt: image };
+  }
+  if (step === "yayin") {
+    const aciklama = clip(raw.aciklama, 4000);
+    const etiketler = strings(raw.etiketler, 32, 15);
+    const sabit = clip(raw.sabit_yorum, 400);
+    if (aciklama.length < 40 || etiketler.length < 3 || sabit.length < 8) return null;
+    return { aciklama, etiketler, sabit_yorum: sabit };
   }
   if (step === "metin") {
     const parcalar = strings(raw.parcalar, 1800, 12);
@@ -327,6 +352,43 @@ export function acceptStep(
   };
 }
 
+export function promptsTooAlike(left: string, right: string) {
+  const words = (value: string) =>
+    new Set(
+      value
+        .toLocaleLowerCase("en")
+        .split(/[^a-z0-9]+/)
+        .filter((word) => word.length > 3),
+    );
+  const a = words(left);
+  const b = words(right);
+  if (a.size < 4 || b.size < 4) return false;
+  let shared = 0;
+  for (const word of a) if (b.has(word)) shared += 1;
+  return shared / Math.max(a.size, b.size) > 0.72;
+}
+
+export function readSections(raw: Record<string, unknown>, min = 1) {
+  const bolumler = (Array.isArray(raw.bolumler) ? raw.bolumler : [])
+    .map((item) => {
+      const row = item && typeof item === "object" ? (item as Record<string, unknown>) : null;
+      if (!row) return null;
+      const baslik = clip(row.baslik, 120);
+      const spoken = cleanSpeech(clip(row.metin, 8000)).text;
+      if (!baslik || spoken.length < 8) return null;
+      return { baslik, metin: spoken };
+    })
+    .filter((item): item is { baslik: string; metin: string } => Boolean(item))
+    .slice(0, 16);
+  if (bolumler.length < min) return null;
+  let cursor = 0;
+  const beats = bolumler.map((item) => {
+    const time = stamp(cursor);
+    cursor += Math.max(20, Math.round((item.metin.split(/\s+/).length / 145) * 60));
+    return { time, title: item.baslik, voice: item.metin, screen: "", visual: item.baslik, draft: false };
+  });
+  return { bolumler, beats };
+}
 function stamp(seconds: number) {
   const minute = Math.floor(seconds / 60);
   const second = seconds % 60;

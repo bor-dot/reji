@@ -2,6 +2,8 @@ import { useServerFn } from "@tanstack/react-start";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Channel } from "@/lib/studio/channels";
 import { pollSesleJob, speakScript, startSesleJob } from "@/lib/studio/generate";
+import { produceVoice } from "@/lib/studio/produce";
+import { mixProjectAudio, readProjectMedia } from "@/lib/studio/project-files";
 import { exportFolderName } from "@/lib/studio/karevo";
 import { narrationChunks, narrationText } from "@/lib/studio/narration";
 import { putSceneAudio } from "@/lib/studio/scene-audio";
@@ -17,6 +19,129 @@ type Take = { id: string; text: string; voiceId: string; speed: number; createdA
 
 const PREFS = "reji.ses.v1";
 const HISTORY = "reji.ses.history.v1";
+
+function BeatVoices({ project, channel }: { project: Project; channel: Channel }) {
+  const { patchPack, keyFor } = useStudio();
+  const speak = useServerFn(produceVoice);
+  const read = useServerFn(readProjectMedia);
+  const mix = useServerFn(mixProjectAudio);
+  const [busy, setBusy] = useState("");
+  const [urls, setUrls] = useState<Record<number, string>>({});
+  const [mixUrl, setMixUrl] = useState("");
+  const beats = project.pack.beats;
+
+  useEffect(() => {
+    let stop = false;
+    beats.forEach((beat, index) => {
+      if (!beat.audioPath) return;
+      void read({ data: { path: beat.audioPath } }).then((res) => {
+        if (stop || !res.ok) return;
+        const bytes = Uint8Array.from(atob(res.base64), (char) => char.charCodeAt(0));
+        const url = URL.createObjectURL(new Blob([bytes], { type: "audio/mpeg" }));
+        setUrls((prev) => ({ ...prev, [index]: url }));
+      });
+    });
+    return () => {
+      stop = true;
+    };
+  }, [beats, read]);
+
+  async function render(index: number) {
+    const beat = beats[index];
+    if (!beat || beat.voice.trim().length < 2) {
+      notify("Bu bölümde okunacak metin yok.");
+      return;
+    }
+    setBusy(String(index));
+    try {
+      const blob = keyFor("xai");
+      const res = await speak({
+        data: {
+          text: beat.voice.slice(0, 3000),
+          sesle: "Ultra Epic",
+          xai: voiceForChannel(channel).id,
+          language: project.brief.language,
+          projectId: project.id,
+          index,
+          sealed: blob ? { iv: blob.iv, ciphertext: blob.ciphertext } : undefined,
+        },
+      });
+      if (!res.ok) throw new Error(res.error);
+      patchPack(project.id, {
+        beats: beats.map((item, itemIndex) =>
+          itemIndex === index ? { ...item, audioPath: res.path, duration: res.duration || item.duration } : item,
+        ),
+      });
+      const bytes = Uint8Array.from(atob(res.audioBase64), (char) => char.charCodeAt(0));
+      setUrls((prev) => ({ ...prev, [index]: URL.createObjectURL(new Blob([bytes], { type: "audio/mpeg" })) }));
+      notify(res.path || "Ses hazır.");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Ses yazılamadı.");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function combine() {
+    const paths = beats.map((beat) => beat.audioPath).filter((path): path is string => Boolean(path));
+    if (paths.length < 2) {
+      notify("Önce en az iki bölümü seslendir.");
+      return;
+    }
+    setBusy("mix");
+    try {
+      const res = await mix({ data: { projectId: project.id, paths } });
+      if (!res.ok) throw new Error(res.error);
+      const file = await read({ data: { path: res.path } });
+      if (!file.ok) throw new Error(file.error);
+      const bytes = Uint8Array.from(atob(file.base64), (char) => char.charCodeAt(0));
+      setMixUrl(URL.createObjectURL(new Blob([bytes], { type: "audio/mpeg" })));
+      notify(res.path);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Ses birleşmedi.");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-3">
+      {beats.map((beat, index) => (
+        <article key={`${beat.title}-${index}`} className="rounded-xl bg-elevated p-4 ring-1 ring-line">
+          <div className="flex items-center justify-between gap-3">
+            <h3 className="text-lg">{beat.draft ? "taslak · " : ""}{beat.title}</h3>
+            <span className="nums text-sm text-faint">{beat.duration ? clock(beat.duration) : beat.time}</span>
+          </div>
+          <textarea
+            className={`${fieldClass} mt-2 min-h-24 py-3`}
+            value={beat.voice}
+            onChange={(event) =>
+              patchPack(project.id, {
+                beats: beats.map((item, itemIndex) => (itemIndex === index ? { ...item, voice: event.target.value } : item)),
+              })
+            }
+          />
+          {urls[index] ? <audio controls src={urls[index]} className="mt-3 w-full" /> : null}
+          <p className="mt-2 text-sm text-faint">{beat.audioPath || "Henüz dosya yok."}</p>
+          <Button className="mt-2" variant="line" disabled={busy === String(index)} onClick={() => void render(index)}>
+            {busy === String(index) ? "Seslendiriliyor…" : beat.audioPath ? "Yeniden üret" : "Bu bölümü seslendir"}
+          </Button>
+        </article>
+      ))}
+      <Button disabled={busy === "mix"} onClick={() => void combine()}>
+        {busy === "mix" ? "Birleştiriliyor…" : "Tümünü birleştir"}
+      </Button>
+      {mixUrl ? (
+        <div>
+          <audio controls src={mixUrl} className="w-full" />
+          <a className="mt-2 inline-block text-sm text-fg underline" href={mixUrl} download="birlesik.mp3">
+            Birleşik dosyayı indir
+          </a>
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
 function clock(seconds: number) {
   const safe = Math.max(0, Math.floor(seconds || 0));
@@ -192,8 +317,9 @@ export function VoiceStage({ project, channel }: { project: Project; channel: Ch
       setTime(0);
       remember({ text: spoken, voiceId, speed });
       notify("Ses hazır.");
-    } catch {
-      notify("Ses oluşturulamadı. Tekrar dene.");
+    } catch (error) {
+      console.error(error);
+      notify(error instanceof Error ? error.message : "Ses oluşturulamadı. Tekrar dene.");
     } finally {
       setBusy(false);
     }
@@ -265,6 +391,7 @@ export function VoiceStage({ project, channel }: { project: Project; channel: Ch
           Önce Grok okur. Kota bitince Sesle. {channel.name} için önerilen ses {suggested.name}.
         </p>
       </div>
+      <BeatVoices project={project} channel={channel} />
       <div className="flex gap-2">
         <Chip active={mode === "xai"} onClick={() => setMode("xai")}>
           Grok ses

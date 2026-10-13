@@ -40,6 +40,7 @@ function MinutesField({ value, onCommit }: { value: number; onCommit: (minutes: 
       }}
       onBlur={() => {
         editing.current = false;
+        if (text === "") return;
         const next = clampMinutes(Number(text));
         setText(String(next));
         onCommit(next);

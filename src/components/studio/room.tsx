@@ -2,9 +2,10 @@ import { Link } from "@tanstack/react-router";
 import { useServerFn } from "@tanstack/react-start";
 import { useEffect, useRef, useState } from "react";
 import { needsSources, type Channel } from "@/lib/studio/channels";
-import { briefKey, critique, scenesFor, scoreOf, toMarkdown, voiceMinutes } from "@/lib/studio/engine";
+import { briefKey, chaptersFromBeats, critique, scenesFor, scoreOf, toMarkdown, voiceMinutes } from "@/lib/studio/engine";
 import { continueBeats, deepenPack, imagineScene, planTextSource, pollSceneVideo, startSceneVideo, writeNarration } from "@/lib/studio/generate";
 import { countWords, docxBytes, narrationText, plainText, spreadNarration, targetWords } from "@/lib/studio/narration";
+import { keepRemoteMedia, readProjectMedia } from "@/lib/studio/project-files";
 import { putSceneVideo } from "@/lib/studio/scene-audio";
 import { useStudio } from "@/lib/studio/store";
 import { notify } from "@/lib/studio/toast";
@@ -441,6 +442,7 @@ function BriefStage({
   onPatch: (patch: Partial<Project["brief"]>) => void;
 }) {
   const { brief } = project;
+  const [minutesText, setMinutesText] = useState(String(brief.minutes));
   return (
     <div className="grid gap-4">
       <h2 className="text-2xl">Brief</h2>
@@ -492,9 +494,13 @@ function BriefStage({
             type="number"
             min={1}
             max={30}
-            value={brief.minutes}
+            value={minutesText}
             disabled={brief.format === "shorts"}
-            onChange={(e) => onPatch({ minutes: Number(e.target.value) || 1 })}
+            onChange={(e) => {
+              const raw = e.target.value.replace(/\D/g, "");
+              setMinutesText(raw);
+              if (raw !== "") onPatch({ minutes: Number(raw) });
+            }}
           />
         </label>
       </div>
@@ -693,7 +699,7 @@ function ScriptStage({
         <article key={`${beat.time}-${index}`} className="grid gap-3 rounded-xl bg-elevated p-4 ring-1 ring-line sm:grid-cols-[4.5rem_minmax(0,1fr)]">
           <p className="nums text-sm text-faint">{beat.time}</p>
           <div className="flex min-w-0 flex-col gap-2">
-            <h3 className="text-lg">{beat.title}</h3>
+            <h3 className="text-lg">{beat.title}{beat.draft ? " · taslak" : ""}</h3>
             <textarea
               className={`${fieldClass} min-h-24 py-3`}
               value={beat.voice}
@@ -1021,6 +1027,9 @@ function VisualStage({ project, channel }: { project: Project; channel: Channel 
   const imagine = useServerFn(imagineScene);
   const start = useServerFn(startSceneVideo);
   const poll = useServerFn(pollSceneVideo);
+  const keep = useServerFn(keepRemoteMedia);
+  const readMedia = useServerFn(readProjectMedia);
+  const [images, setImages] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState("");
   const [previews, setPreviews] = useState<Record<string, string>>({});
   const alive = useRef(true);
@@ -1028,10 +1037,18 @@ function VisualStage({ project, channel }: { project: Project; channel: Channel 
 
   useEffect(() => {
     alive.current = true;
+    let stop = false;
+    for (const scene of project.pack.scenes ?? []) {
+      if (!scene.imagePath) continue;
+      void readMedia({ data: { path: scene.imagePath } }).then((res) => {
+        if (!stop && res.ok) setImages((prev) => ({ ...prev, [scene.id]: `data:image/png;base64,${res.base64}` }));
+      });
+    }
     return () => {
       alive.current = false;
+      stop = true;
     };
-  }, []);
+  }, [project.id, project.updatedAt, readMedia]);
 
   function sealed(route: "xai" | "gemini") {
     const blob = keyFor(route);
@@ -1040,6 +1057,23 @@ function VisualStage({ project, channel }: { project: Project; channel: Channel 
 
   function routeOf(scene: Scene): "xai" | "gemini" | "elle" {
     return scene.route ?? "xai";
+  }
+
+  async function persist(scene: Scene, folder: "gorsel" | "video", url: string) {
+    const index = Math.max(1, scenes.findIndex((item) => item.id === scene.id) + 1);
+    const saved = await keep({
+      data: {
+        projectId: project.id,
+        folder,
+        name: `${String(index).padStart(2, "0")}.${folder === "gorsel" ? "png" : "mp4"}`,
+        url,
+      },
+    });
+    if (!saved.ok) {
+      notify(saved.error);
+      return "";
+    }
+    return saved.path;
   }
 
   function writeScene(id: string, patch: Partial<Scene>) {
@@ -1059,11 +1093,14 @@ function VisualStage({ project, channel }: { project: Project; channel: Channel 
       if (!alive.current) return;
       if (!res.ok) notify(mediaNote(res.error));
       else {
-        writeScene(scene.id, { imageUrl: res.url });
-        notify("Görsel geldi.");
+        const path = await persist(scene, "gorsel", res.url);
+        writeScene(scene.id, { imagePath: path || scene.imagePath, imageUrl: path ? undefined : res.url });
+        if (res.url) setImages((prev) => ({ ...prev, [scene.id]: res.url }));
+        notify(path ? "Görsel kaydedildi." : "Görsel geldi ama dosyaya yazılamadı.");
       }
-    } catch {
-      if (alive.current) notify("Görsel üretilemedi.");
+    } catch (error) {
+      console.error(error);
+      if (alive.current) notify(error instanceof Error ? error.message : "Görsel üretilemedi.");
     } finally {
       if (alive.current) setBusy("");
     }
@@ -1088,7 +1125,8 @@ function VisualStage({ project, channel }: { project: Project; channel: Channel 
         notify(mediaNote(started.error));
         return;
       }
-      const deadline = Date.now() + (route === "gemini" ? 240_000 : 120_000);
+      const deadline = Date.now() + 600_000;
+      writeScene(scene.id, { videoStatus: "işleniyor", videoJob: started.requestId });
       while (Date.now() < deadline) {
         await new Promise((resolve) => window.setTimeout(resolve, route === "gemini" ? 8000 : 5000));
         if (!alive.current) return;
@@ -1099,14 +1137,18 @@ function VisualStage({ project, channel }: { project: Project; channel: Channel 
           return;
         }
         if (status.status === "done" && status.url) {
-          writeScene(scene.id, { videoUrl: status.url });
-          notify("Video geldi.");
+          const path = await persist(scene, "video", status.url);
+          writeScene(scene.id, { videoUrl: status.url, videoPath: path, videoStatus: path ? "hazır" : "adres geçici" });
+          notify(path ? "Video kaydedildi." : "Video geldi ama dosyaya yazılamadı.");
           return;
         }
+        writeScene(scene.id, { videoStatus: "işleniyor" });
       }
-      notify("Video hâlâ işleniyor. Birazdan aynı sahneyi tekrar dene.");
-    } catch {
-      if (alive.current) notify("Video başlatılamadı.");
+      notify("Video hâlâ işleniyor. Kart durumunu gösteriyor, sorgu sürer.");
+      writeScene(scene.id, { videoStatus: "işleniyor" });
+    } catch (error) {
+      console.error(error);
+      if (alive.current) notify(error instanceof Error ? error.message : "Video başlatılamadı.");
     } finally {
       if (alive.current) setBusy("");
     }
@@ -1165,9 +1207,12 @@ function VisualStage({ project, channel }: { project: Project; channel: Channel 
       {scenes.map((scene) => (
         <article key={scene.id} className="grid gap-4 rounded-xl bg-elevated p-4 ring-1 ring-line">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <h3 className="text-lg">{scene.title}</h3>
+            <h3 className="text-lg">{scene.title}{scene.draft ? " · taslak" : ""}</h3>
+            {scene.videoStatus ? <span className="text-sm text-muted">{scene.videoStatus}</span> : null}
             {scene.simulation ? <span className="text-sm text-fg">yapay zekâ simülasyonu</span> : null}
           </div>
+          {scene.spoken ? <p className="text-sm text-fg">{scene.spoken}</p> : null}
+          {scene.summary ? <p className="text-sm text-muted">{scene.summary}</p> : null}
           <label className="flex flex-col gap-2 text-sm text-muted">
             Görsel prompt
             <textarea
@@ -1220,6 +1265,37 @@ function VisualStage({ project, channel }: { project: Project; channel: Channel 
             <Button variant="line" onClick={() => void copyPrompt(scene.videoPrompt)}>
               Flow için kopyala
             </Button>
+            <Button
+              variant="line"
+              disabled={Boolean(busy)}
+              onClick={() => {
+                void (async () => {
+                  const gemini = await imagine({
+                    data: { prompt: scene.imagePrompt, model: models.image, route: "gemini", sealed: sealed("gemini") },
+                  });
+                  if (gemini.ok) {
+                    const path = await persist(scene, "gorsel", gemini.url);
+                    writeScene(scene.id, { imagePath: path, imageUrl: undefined, route: "gemini" });
+                    setImages((prev) => ({ ...prev, [scene.id]: gemini.url }));
+                    notify("Otomatik görsel kaydedildi.");
+                    return;
+                  }
+                  const xai = await imagine({
+                    data: { prompt: scene.imagePrompt, model: models.image, route: "xai", sealed: sealed("xai") },
+                  });
+                  if (!xai.ok) {
+                    notify(`${gemini.error} ${xai.error}`);
+                    return;
+                  }
+                  const path = await persist(scene, "gorsel", xai.url);
+                  writeScene(scene.id, { imagePath: path, imageUrl: undefined, route: "xai" });
+                  setImages((prev) => ({ ...prev, [scene.id]: xai.url }));
+                  notify("Yedek xAI görseli kaydedildi.");
+                })();
+              }}
+            >
+              Otomatik üret
+            </Button>
           </div>
           <label
             className="flex min-h-24 flex-col items-center justify-center gap-2 rounded-lg px-3 py-4 text-sm text-muted ring-1 ring-dashed ring-line"
@@ -1240,8 +1316,8 @@ function VisualStage({ project, channel }: { project: Project; channel: Channel 
               }}
             />
           </label>
-          {scene.imageUrl ? (
-            <img src={scene.imageUrl} alt="" className="aspect-video w-full rounded-lg object-cover" />
+          {images[scene.id] || scene.imageUrl ? (
+            <img src={images[scene.id] || scene.imageUrl} alt="" className="aspect-video w-full rounded-lg object-cover" />
           ) : null}
           {previews[scene.id] || (scene.videoUrl && !scene.videoUrl.startsWith("idb:")) ? (
             <video src={previews[scene.id] || scene.videoUrl} controls className="aspect-video w-full rounded-lg" />
@@ -1259,8 +1335,38 @@ function SeoStage({ pack, onPatch }: { pack: Pack; onPatch: (patch: Partial<Pack
   const [tag, setTag] = useState("");
   return (
     <div className="flex flex-col gap-4">
+      <div>
+        <p className="text-sm text-fg">YouTube'a yüklerken kopyala-yapıştır</p>
+        <div className="mt-2 flex flex-wrap items-center justify-between gap-3">
+          <h2 className="text-2xl">Yayın</h2>
+          <Button
+            variant="line"
+            onClick={() => {
+              const chapters = chaptersFromBeats(pack.beats);
+              const body = [
+                pack.seo.description,
+                "",
+                ...chapters.map((chapter) => `${chapter.time} ${chapter.title}`),
+                "",
+                pack.seo.tags.join(", "),
+                "",
+                pack.seo.pinned,
+              ].join("\n");
+              const blob = new Blob([body], { type: "text/plain;charset=utf-8" });
+              const url = URL.createObjectURL(blob);
+              const link = document.createElement("a");
+              link.href = url;
+              link.download = "yayin.txt";
+              link.click();
+              URL.revokeObjectURL(url);
+            }}
+          >
+            Hepsini .txt indir
+          </Button>
+        </div>
+      </div>
       <div className="flex items-center justify-between gap-3">
-        <h2 className="text-2xl">Yayın</h2>
+        <h3 className="text-lg">Açıklama</h3>
         <CopyButton text={seo.description} label="Açıklamayı kopyala" />
       </div>
       <label className="flex flex-col gap-2 text-sm text-muted">
@@ -1272,7 +1378,10 @@ function SeoStage({ pack, onPatch }: { pack: Pack; onPatch: (patch: Partial<Pack
         />
       </label>
       <div>
-        <h3 className="text-lg">Bölümler</h3>
+        <div className="flex items-center justify-between gap-3">
+          <h3 className="text-lg">Bölümler</h3>
+          <CopyButton text={seo.chapters.map((chapter) => `${chapter.time} ${chapter.title}`).join("\n")} label="Bölümleri kopyala" />
+        </div>
         <ul className="mt-2 flex flex-col gap-1">
           {seo.chapters.map((chapter) => (
             <li key={chapter.time + chapter.title} className="nums text-sm text-muted">
@@ -1282,7 +1391,10 @@ function SeoStage({ pack, onPatch }: { pack: Pack; onPatch: (patch: Partial<Pack
         </ul>
       </div>
       <div>
-        <h3 className="text-lg">Etiketler</h3>
+        <div className="flex items-center justify-between gap-3">
+          <h3 className="text-lg">Etiketler</h3>
+          <CopyButton text={seo.tags.join(", ")} label="Etiketleri kopyala" />
+        </div>
         <ul className="mt-2 flex flex-wrap gap-2">
           {seo.tags.map((item) => (
             <li key={item}>

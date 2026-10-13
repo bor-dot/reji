@@ -548,6 +548,7 @@ function beatsFor(b: Brief): Beat[] {
     voice: p.voice,
     screen: p.screen,
     visual: p.visual,
+    draft: true,
   }));
 }
 
@@ -600,33 +601,19 @@ function thumbFor(b: Brief, channel: Channel): Thumb {
   };
 }
 
-export function scenesFor(b: Brief, channel: Channel, beats: Beat[], previous?: Scene[]): Scene[] {
+export function scenesFor(b: Brief, channel: Channel, beats: Beat[], _previous?: Scene[]): Scene[] {
   return beats.map((beat, index) => {
     const reconstruction =
       channel.kind === "belgesel" ? index > 0 && index < beats.length - 1 : channel.kind === "mitoloji";
-    const label = reconstruction ? " Yapay zekâ simülasyonu, arşiv görüntüsü değil." : "";
-    const visual = beat.visual.replace(/\.+$/, "");
-    const imagePrompt = [
-      channel.visualStyle,
-      "16:9, sinematik ışık, tek ana öğe, kadrajın üst yarısı, karede yazı yok, logo yok.",
-      `Sahne: ${beat.title}.`,
-      `${visual}.`,
-      label.trim(),
-    ]
-      .filter(Boolean)
-      .join(" ");
-    const videoPrompt = `${imagePrompt} Tek plan, 6 saniye, kamera sabit ya da çok hafif, yavaş hareket, kesme yok.`;
-    const prev = previous?.find((scene) => scene.title === beat.title);
     return {
-      id: prev?.id ?? `sahne-${index + 1}`,
+      id: `sahne-${index + 1}`,
       title: beat.title,
-      imagePrompt,
-      videoPrompt,
+      imagePrompt: "",
+      videoPrompt: "",
+      spoken: "",
+      summary: "",
       simulation: reconstruction,
-      imageUrl: prev?.imageUrl,
-      videoUrl: prev?.videoUrl,
-      audioDuration: prev?.audioDuration,
-      route: prev?.route,
+      draft: true,
     };
   });
 }
@@ -650,6 +637,19 @@ export function seriesBriefs(b: Brief, channel: Channel): Brief[] {
     title: clip(`${b.title}: ${angle}`, 110),
     promise,
   }));
+}
+
+export function chaptersFromBeats(beats: Beat[]) {
+  const hasDuration = beats.some((beat) => (beat.duration ?? 0) > 0);
+  if (!hasDuration) {
+    return beats.map((beat, index) => ({ time: index === 0 ? "0:00" : beat.time, title: beat.title }));
+  }
+  let cursor = 0;
+  return beats.map((beat) => {
+    const time = clock(cursor);
+    cursor += Math.max(1, Math.round(beat.duration || 0));
+    return { time, title: beat.title };
+  });
 }
 
 function tagsFor(b: Brief) {

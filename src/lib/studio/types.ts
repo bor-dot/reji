@@ -27,6 +27,9 @@ export type Beat = {
   voice: string;
   screen: string;
   visual: string;
+  draft?: boolean;
+  audioPath?: string;
+  duration?: number;
 };
 
 export type ShotKind = "A-roll" | "B-roll" | "Grafik" | "Ses";
@@ -75,6 +78,11 @@ export type Scene = {
   summary?: string;
   seconds?: number;
   mediaKind?: "video" | "gorsel";
+  draft?: boolean;
+  imagePath?: string;
+  videoPath?: string;
+  videoStatus?: string;
+  videoJob?: string;
 };
 
 export type Pack = {

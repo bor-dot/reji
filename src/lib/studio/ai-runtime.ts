@@ -54,7 +54,8 @@ export function openSecret(iv: string, ciphertext: string) {
     const decipher = createDecipheriv("aes-256-gcm", key, ivBuf);
     decipher.setAuthTag(tag);
     return Buffer.concat([decipher.update(data), decipher.final()]).toString("utf8");
-  } catch {
+  } catch (error) {
+    console.error("Kayıtlı anahtar açılamadı.", error);
     return null;
   }
 }
@@ -82,6 +83,12 @@ function clipError(status: number, body: string) {
   return `Yanıt ${status}. ${clean}`;
 }
 
+function fault(error: unknown, fallback: string) {
+  const message = error instanceof Error ? error.message : fallback;
+  console.error(fallback, error);
+  return message || fallback;
+}
+
 export async function completeText(input: {
   model: string;
   system: string;
@@ -90,10 +97,26 @@ export async function completeText(input: {
   maxTokens?: number;
   json?: boolean;
 }) {
+  const prompt = `${input.system}\n\n${input.user}`;
+  const cliErrors: string[] = [];
+  try {
+    const probe = await probeClis();
+    const ready = new Set(probe.items.filter((row) => row.status === "bagli").map((row) => row.id));
+    for (const id of ["grok", "codex", "claude", "gemini"] as const) {
+      if (!ready.has(id)) continue;
+      const written = await runCliText(id, prompt);
+      if (written.ok && written.text.trim()) return { ok: true as const, text: written.text, via: sourceLabel(id) };
+      if (!written.ok) cliErrors.push(written.error);
+    }
+  } catch (error) {
+    cliErrors.push(fault(error, "CLI yazamadı."));
+  }
   const model = TEXT_MODELS[input.model] ? input.model : "grok-4.5";
   const provider = TEXT_MODELS[model];
   const key = resolveKey(provider, input.sealed);
-  if (!key) return { ok: false as const, error: "Bu model için kayıtlı anahtar yok." };
+  if (!key) {
+    return { ok: false as const, error: cliErrors[0] || "Bu model için kayıtlı anahtar yok." };
+  }
   try {
     if (provider === "xai" || provider === "openai") {
       const url =
@@ -153,7 +176,7 @@ export async function completeText(input: {
     return { ok: true as const, text };
   } catch (error) {
     if (error instanceof Error && error.name === "TimeoutError") return { ok: false as const, error: "Süre doldu. Yine Devam et." };
-    return { ok: false as const, error: "Bağlantı koptu." };
+    return { ok: false as const, error: fault(error, "Bağlantı koptu.") };
   }
 }
 
@@ -192,8 +215,8 @@ export async function imagineImage(prompt: string, model: string, sealed?: { iv:
     const url = body.data?.[0]?.url;
     if (!url) return { ok: false as const, error: "Görsel adresi gelmedi." };
     return { ok: true as const, url };
-  } catch {
-    return { ok: false as const, error: "Görsel isteği koptu." };
+  } catch (error) {
+    return { ok: false as const, error: fault(error, "Görsel isteği koptu.") };
   }
 }
 
@@ -217,8 +240,8 @@ export async function startVideo(prompt: string, model: string, sealed?: { iv: s
     const body = (await res.json()) as { request_id?: string };
     if (!body.request_id) return { ok: false as const, error: "Video isteği açılmadı." };
     return { ok: true as const, requestId: body.request_id };
-  } catch {
-    return { ok: false as const, error: "Video isteği koptu." };
+  } catch (error) {
+    return { ok: false as const, error: fault(error, "Video isteği koptu.") };
   }
 }
 
@@ -322,8 +345,8 @@ export async function speakText(input: {
       duration: Number(body.duration) || 0,
       words,
     };
-  } catch {
-    return { ok: false as const, error: "Ses isteği koptu." };
+  } catch (error) {
+    return { ok: false as const, error: fault(error, "Ses isteği koptu.") };
   }
 }
 
@@ -342,8 +365,8 @@ export async function pollVideo(requestId: string, sealed?: { iv: string; cipher
       return { ok: false as const, error: body.error || "Video üretilemedi." };
     }
     return { ok: true as const, status: "pending" as const };
-  } catch {
-    return { ok: false as const, error: "Video durumu okunamadı." };
+  } catch (error) {
+    return { ok: false as const, error: fault(error, "Video durumu okunamadı.") };
   }
 }
 
@@ -380,8 +403,9 @@ async function findBin(name: string) {
     try {
       await access(full, constants.X_OK);
       return full;
-    } catch {
-      /* next */
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT") console.error(full, error);
     }
   }
   return null;
@@ -391,7 +415,9 @@ async function fileExists(path: string) {
   try {
     await access(path, constants.R_OK);
     return true;
-  } catch {
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT") console.error(path, error);
     return false;
   }
 }
@@ -497,8 +523,8 @@ export async function geminiImage(prompt: string, model: string, sealed?: { iv: 
     const inline = body.candidates?.[0]?.content?.parts?.find((part) => part.inlineData?.data)?.inlineData;
     if (!inline?.data) return { ok: false as const, error: "Görsel gelmedi." };
     return { ok: true as const, url: `data:${inline.mimeType || "image/png"};base64,${inline.data}` };
-  } catch {
-    return { ok: false as const, error: "Gemini görsel isteği koptu." };
+  } catch (error) {
+    return { ok: false as const, error: fault(error, "Gemini görsel isteği koptu.") };
   }
 }
 
@@ -521,8 +547,8 @@ export async function startVeo(prompt: string, resolution: "720p" | "1080p", sea
     const body = (await res.json()) as { name?: string };
     if (!body.name) return { ok: false as const, error: "Veo isteği açılmadı." };
     return { ok: true as const, requestId: body.name };
-  } catch {
-    return { ok: false as const, error: "Veo isteği koptu." };
+  } catch (error) {
+    return { ok: false as const, error: fault(error, "Veo isteği koptu.") };
   }
 }
 
@@ -553,8 +579,8 @@ export async function pollVeo(name: string, sealed?: { iv: string; ciphertext: s
     const bytes = Buffer.from(await file.arrayBuffer());
     if (bytes.length < 32 || bytes.length > 12_000_000) return { ok: false as const, error: "Video dosyası kullanılamadı." };
     return { ok: true as const, status: "done" as const, url: `data:video/mp4;base64,${bytes.toString("base64")}` };
-  } catch {
-    return { ok: false as const, error: "Veo durumu okunamadı." };
+  } catch (error) {
+    return { ok: false as const, error: fault(error, "Veo durumu okunamadı.") };
   }
 }
 
